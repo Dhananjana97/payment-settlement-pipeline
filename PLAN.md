@@ -139,13 +139,13 @@ Decisions to write down (they feed DESIGN.md directly):
 - [ ] **Tests:** unit — `domain/payout_fsm.py` every row of the `BANK-API.md` table as verified in `bank.py` (A7 outcome matrix), key-age boundary, `account_closed` terminal; app — executor with `FakeBank` + `FakeClock` driving timeout→same-key→replay and maintenance→ambiguous→search→new-key paths, crash-at-every-transition replay; integration — `claim()` with `SKIP LOCKED` under 2 executors, cross-process limiter (A7), `HttpBank` against the real `bank.py` incl. shrunk windows.
 - [ ] **Milestone:** `verify.py check` → `RESULT: PASS` with default bank chaos, then with shrunk windows (`BANK_IDEMPOTENCY_TTL_S=20 BANK_OUTAGE_FIRST_S=30 BANK_OUTAGE_LEN_S=30 BANK_OUTAGE_EVERY_S=90`).
 
-### Step 6 — Part C: REVIEW.md + reproducers (3:45–4:45)
-- [ ] Walk each incumbent file; list every defect with `file:line`, trigger, impact, fix. Rank by severity. Target > 20 (they know > 20).
-- [ ] Root-cause the three symptoms with named defects + sequence of events:
+### Step 6 — Part C: REVIEW.md + reproducers (3:45–4:45) — ✅ DONE 2026-11-04 (`docs/STEP6-PLAN.md`, branch `feature/step-6-review`)
+- [x] Walk each incumbent file; list every defect with `file:line`, trigger, impact, fix. Rank by severity. Target > 20 (they know > 20).
+- [x] Root-cause the three symptoms with named defects + sequence of events:
   - 14 double payouts (hint: idempotency key vs 120 s TTL + 15-min maintenance window; ambiguous responses retried; two readers "session up" same minute → duplicate accepted payouts).
   - 3 busy-merchant balance drift (hint: 16 threads breaking per-merchant order; Redis checkpoint lost on restart; offset commit before DB commit; REPEATABLE READ overdraft).
   - 9 accepted-but-never-sent payouts (hint: outbox row claimed then crashed with no lease expiry; executor "stopped for 40 min" = stuck token/limiter; PgBouncer transaction pooling + session-level state).
-- [ ] Executable reproducers for top 5 in `tests/incumbent/`: each fails against extracted incumbent logic and passes against the fix.
+- [x] Executable reproducers for top 5 in `tests/incumbent/`: each fails against extracted incumbent logic and passes against the fix. 45 defects in `REVIEW.md`; 5 + 3 bonus reproducers (strict xfail vs incumbent, pass vs fix); P4 also on real Postgres.
 
 ### Step 7 — Part B: DESIGN.md (4:45–5:30)
 Answer all 9 questions with numbers against §2 (60k merchants, 4k–30k ev/s, 3B rows, 50 req/s bank, 1.5M month-end payouts):
