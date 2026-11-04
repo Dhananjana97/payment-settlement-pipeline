@@ -258,17 +258,17 @@ Logging: every session event carries `session_epoch`; drops/resends carry `chann
 - [x] `app.py`, `main.py` (replace stub), readiness, metrics
 - [x] `tests/unit/reader/fakes.py` + `test_app.py`
 - [x] integration tests green with compose up
-- [ ] manual fault check: `kill -9` leader → failover < 15 s; `SIGSTOP` 45 s → superseded, resumes standby; `docker compose stop postgres` 5 s → same leader afterwards
+- [x] fault check via `scripts/faults.sh all` → PASS: `kill -9` handover 8.5 s / session up 8.6 s; `SIGSTOP` 45 s takeover 9.0 s, old leader steps down on wake; Postgres restart keeps the leader
 - [x] go-back-N waste measured and recorded under D13
 - [x] **cut line:** sequencer unit tests + one e2e run mandatory; the rest optional if the 75 min run out
 - [x] `docs/DECISIONS.md`: append D12, D13, D15, D16 (D14, D17, D19, D20 already recorded 2026-11-04)
-- [ ] commit on `feature/step-2-session-reader`; tick Step 2 in `PLAN.md`
+- [x] committed `17a403e` on `feature/step-2-session-reader`, merged as PR #3
 
 ## Execution notes
 
 - **Tests.** 84 unit (sequencer 30, liveness 5, messages 8, app 13, the rest from Step 1), 13 integration (bosp client 5, pg lock/fence/checkpoint 5, migrations 3). All green.
 - **E2E.** `ReaderApp` with its own `client_id` and topic against the chaos gateway and real Redpanda: 383,490 messages over 200 channels in 45 s (8,477 msg/s), no holes in any channel, 1 session.
-- **Faults.** `kill -9` leader → lease handed over in 8.7 s (budget 15 s), new session up. Postgres restart → leader logged "lock store unavailable; keeping session" and kept the session (D20). SIGSTOP: see `scripts/faults.sh` output in PLAN.md.
+- **Faults.** `kill -9` leader → lease handed over in 8.7 s (budget 15 s), new session up. Postgres restart → leader logged "lock store unavailable; keeping session" and kept the session (D20). SIGSTOP (process-level, via `scripts/faults.sh`): standby took the lease after 9.0 s; old leader logged `stepping down reason=lock_lost` 0.2 s after `SIGCONT` and did not reconnect. Signals are sent to the worker process (tini is PID 1, `init: true`), because `docker kill` is a manual stop that defeats the restart policy.
 - **Methodology lesson.** `docker kill` counts as a manual stop and defeats `restart: unless-stopped`, so the killed replica never came back as a standby. Faults must target the host PID (`kill -9 $(docker inspect -f '{{.State.Pid}}' …)`) so the container restarts.
 
 ## 12. Deferred
