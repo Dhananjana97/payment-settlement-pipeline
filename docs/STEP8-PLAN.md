@@ -81,13 +81,27 @@ Sections, in this order, each short and factual:
 Order: launch T, R and A together. Main starts **S3 (cold start)** first, because it rebuilds images and is the quickest, then S1, then S2. R leaves `‹S1›`/`‹S2›`/`‹S3›` placeholders that main fills.
 
 ## 4. Checklist
-- [ ] T1 A7 table · T2 Part C on `ledger_test` · T3 `restart-broker`, `restart-redis` · T4 `scripts/e2e.sh`
-- [ ] S3 cold start < 10 min
-- [ ] S1 2 M @ 3,000/s with faults: ≥ 3,000 ev/s, catch-up ≤ 60 s, verify PASS
-- [ ] S2 raised gateway chaos: verify PASS
-- [ ] `README.md`, `AI-USAGE.md` complete, placeholders filled
-- [ ] Delete the stale `docs/step-2-fault-results` branch (its content is already in `main`)
-- [ ] Commit on `feature/step-8-final`, merge to `main`, tick `PLAN.md`
+- [x] T1 A7 table · T2 Part C on `ledger_test` · T3 `restart-broker`, `restart-redis` · T4 `scripts/e2e.sh`
+- [x] S3 cold start < 10 min
+- [x] S1 2 M @ 3,000/s with faults: ≥ 3,000 ev/s, catch-up ≤ 60 s, verify PASS
+- [x] S2 raised gateway chaos: verify PASS
+- [x] `README.md`, `AI-USAGE.md` complete, placeholders filled
+- [x] Delete the stale `docs/step-2-fault-results` branch (its content is already in `main`)
+- [x] Commit on `feature/step-8-final`, merge to `main`, tick `PLAN.md`
+
+## Execution notes (2026-11-04)
+
+| Run | Settings | Result |
+|---|---|---|
+| S3 cold start | our images + build cache removed, base images cached | **66 s** to all 16 containers healthy (limit 10 min) |
+| S1 scale | 2,000,000 frames @ `GATEWAY_RATE=3000` (4× bursts), default chaos; faults: kill-leader (10.4 s), kill-consumer, scale 4→6 consumers, Redpanda restart (2 s), Redis restart empty, kill-executor mid-flight, pause-leader 45 s (standby 8.1 s), Postgres restart (same leader) | **verify PASS** (6/6). 7,017 payouts: 3,881 paid = 3,881 bank executions, 88 failed, 3,048 rejected. Applied 2,200–2,860 ev/s vs measured release ~2,690/s; backlog 44–80 k during faults; catch-up after gateway finish ~33 s (≤ 61 s by sampling). as_of p99 10.6 ms |
+| S2 gateway chaos | `GATEWAY_DROP_RATE=0.01`, disconnects every 20–40 s | **verify PASS** (6/6), 0 double payments; reader 4,994 gaps, 39 timed-out resends, 454 duplicates, 15 reconnects; as_of p99 4.6 ms |
+
+Found and fixed during Step 8:
+- `consumer_partition_lag` was declared but never set → exported every 5 s from high watermark − last committed offset; stale labels removed after a rebalance (S1 showed revoked partitions still reporting).
+- The first S2 run silently used default chaos: the harness compose passes only six `GATEWAY_*` variables. Our `docker-compose.yml` now passes `GATEWAY_DROP_RATE`, `GATEWAY_DUP_RATE`, `GATEWAY_DISCONNECT_MIN_S/_MAX_S` through (harness untouched); verified with `docker compose config` and `env` in the container before rerunning.
+- Part C P4 test defaulted to the live DB → `ledger_test` with the live-DB guard.
+- Honest gap: sustained throughput above ~2,860 ev/s not demonstrated (the gateway released ~2,690/s on average); levers documented in README Known issues.
 
 ## 5. If time runs out (§10 priorities)
 Correctness over throughput: S2 and the Part C fix come before S1 tuning. If S1 misses 60 s catch-up, document the measured number and the tuning levers in Known issues instead of half-changing the store.

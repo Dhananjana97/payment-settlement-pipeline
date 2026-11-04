@@ -9,6 +9,8 @@
 #   scripts/faults.sh scale-consumers N      # §5.4 #3: add consumers (rebalance)
 #   scripts/faults.sh kill-executor          # §5.4 #7a: kill -9 an executor while a payout is in flight
 #   scripts/faults.sh kill-executor-in-maintenance  # §5.4 #7b: same, during a bank maintenance window
+#   scripts/faults.sh restart-broker         # §5.4 #4: restart Redpanda; readers reconnect, group lag back to 0
+#   scripts/faults.sh restart-redis          # §5.4 #5: restart Redis without persistence; limiter falls back, recovers
 #   scripts/faults.sh all                    # reader faults, consumer faults, then the executor faults, 10 s apart
 #
 # Signals are delivered to the reader *process*, not the container:
@@ -269,6 +271,76 @@ cmd_scale_consumers() {
   pass "$n consumers healthy after rebalance, no errors"
 }
 
+gateway_finished() { curl -fsS localhost:7101/status 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('finished'))" 2>/dev/null || echo "?"; }
+group_lag() {  # TOTAL-LAG of consumer group `ledger` if rpk prints it, else empty
+  docker compose exec -T redpanda rpk group describe ledger --brokers redpanda:9092 2>/dev/null \
+    | awk '$1=="TOTAL-LAG"{print $2; exit}' || true
+}
+group_lag_sum() {  # fallback: sum the LAG column of the partition table
+  docker compose exec -T redpanda rpk group describe ledger --brokers redpanda:9092 2>/dev/null \
+    | awk 'hdr && NF>=5 {for(i=1;i<=NF;i++) if(h[i]=="LAG" && $i ~ /^[0-9]+$/) s+=$i} /PARTITION/ {hdr=1; for(i=1;i<=NF;i++) h[i]=$i} END{print s+0}'
+}
+executor_fallback() {  # prints the limiter_fallback gauge of each executor (1 = local share mode)
+  local id
+  for id in $(docker compose ps -q executor); do
+    docker exec "$id" python -c "import urllib.request;t=urllib.request.urlopen('http://localhost:9100/metrics',timeout=2).read().decode();print(next((l.split()[-1] for l in t.splitlines() if l.startswith('limiter_fallback ')),'?'))" 2>/dev/null || echo "?"
+  done | tr '\n' ' '
+}
+
+cmd_restart_broker() {
+  echo "== restart the broker (redpanda)  ($(ts))"
+  local before; before=$(applied_count)
+  local fin0; fin0=$(gateway_finished)
+  local t0; t0=$(now)
+  docker compose restart redpanda >/dev/null 2>&1
+  wait_healthy redpanda 90 || fail "redpanda not healthy within 90 s"
+  echo "  redpanda healthy again after $(since "$t0")s"
+  local lag="" i
+  for i in $(seq 1 60); do
+    lag=$(group_lag); [ -z "$lag" ] && lag=$(group_lag_sum)
+    [ "$lag" = "0" ] && break
+    sleep 1
+  done
+  echo "  consumer group 'ledger' lag: ${lag:-?} after $(since "$t0")s"
+  sleep 5
+  local loops; loops=$(docker compose logs --no-log-prefix --since 90s reader 2>/dev/null | grep -c '"reason":"publish_failed"' || true)
+  echo "  reader publish_failed session exits in the last 90 s: ${loops:-0}"
+  [ "${loops:-0}" -le 3 ] || fail "readers loop on publish_failed (${loops} exits)"
+  local after; after=$(applied_count)
+  echo "  processed_events: $before -> $after (gateway finished before: $fin0)"
+  if [ "$fin0" = "False" ]; then
+    [ "$after" -gt "$before" ] || fail "processed_events did not grow while the gateway was still releasing"
+  fi
+  [ "$lag" = "0" ] || [ "$fin0" = "False" ] || fail "group lag did not return to 0 within 60 s (lag=$lag)"
+  local errs; errs=$(docker compose logs --no-log-prefix --since 90s consumer 2>/dev/null | grep -c '"level":"ERROR"' || true)
+  pass "broker restart: readers reconnected (${loops:-0} publish_failed exits), consumers resumed (lag ${lag}, ${errs:-0} ERROR lines)"
+}
+
+cmd_restart_redis() {
+  echo "== restart Redis without persistence  ($(ts))"
+  echo "  executors limiter_fallback before: $(executor_fallback)"
+  docker compose restart redis >/dev/null 2>&1
+  wait_healthy redis 30 || fail "redis not healthy within 30 s"
+  local up keys
+  up=$(docker compose exec -T redis redis-cli INFO server 2>/dev/null | awk -F: '/^uptime_in_seconds/{print $2+0}')
+  keys=$(docker compose exec -T redis redis-cli DBSIZE 2>/dev/null | tr -d '\r')
+  echo "  redis uptime ${up}s, dbsize ${keys} (save/appendonly disabled: data gone)"
+  [ "${up:-999}" -lt 30 ] || fail "redis does not look restarted (uptime ${up}s)"
+  local saw_local=0 back=0 f i
+  for i in $(seq 1 40); do
+    f=$(executor_fallback)
+    echo "$f" | grep -q '1' && saw_local=1
+    if [ "$saw_local" = 1 ] && ! echo "$f" | grep -q '1'; then back=1; break; fi
+    sleep 1
+  done
+  echo "  executors limiter_fallback after: $(executor_fallback) (saw local mode: $saw_local, back to redis: $back)"
+  [ "$saw_local" = 1 ] || echo "  note: no local-mode flip observed (executors idle: no rate-limit acquire happened)"
+  wait_healthy executor 30 || fail "executors unhealthy after the Redis restart"
+  local errs; errs=$(docker compose logs --no-log-prefix --since 60s executor 2>/dev/null | grep -c '"level":"ERROR"' || true)
+  [ "${errs:-0}" = "0" ] || fail "$errs ERROR lines from executors after the Redis restart"
+  pass "Redis restarted empty; executors healthy, no errors (fallback seen=$saw_local, recovered=$back)"
+}
+
 case "${1:-}" in
   leader)            cmd_leader ;;
   kill-leader)       cmd_kill_leader ;;
@@ -278,6 +350,8 @@ case "${1:-}" in
   scale-consumers)   cmd_scale_consumers "${2:-6}" ;;
   kill-executor)     cmd_kill_executor ;;
   kill-executor-in-maintenance) cmd_kill_executor_in_maintenance "${2:-700}" ;;
+  restart-broker)    cmd_restart_broker ;;
+  restart-redis)     cmd_restart_redis ;;
   all)
     cmd_kill_leader;       echo "  settling 10 s"; sleep 10
     cmd_pause_leader 45;   echo "  settling 10 s"; sleep 10
@@ -285,7 +359,9 @@ case "${1:-}" in
     cmd_kill_consumer;     echo "  settling 10 s"; sleep 10
     cmd_scale_consumers 6;  echo "  settling 10 s"; sleep 10
     cmd_kill_executor;      echo "  settling 10 s"; sleep 10
+    cmd_restart_redis;      echo "  settling 10 s"; sleep 10
+    cmd_restart_broker;     echo "  settling 10 s"; sleep 10
     cmd_kill_executor_in_maintenance
     echo "== FAULTS: PASS" ;;
-  *) sed -n '2,17p' "$0"; exit 2 ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
 esac

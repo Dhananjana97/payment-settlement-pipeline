@@ -25,6 +25,7 @@ class RedpandaConsumer:
             "socket.keepalive.enable": True,
         })
         self._c.subscribe([topic])
+        self._committed: dict[int, int] = {}
 
     def poll(self, max_records: int, timeout_s: float) -> list[Record]:
         out: list[Record] = []
@@ -41,9 +42,29 @@ class RedpandaConsumer:
 
     def commit(self, partition: int, next_offset: int) -> None:
         self._c.commit(offsets=[TopicPartition(self._topic, partition, next_offset)], asynchronous=False)
+        self._committed[partition] = next_offset
 
     def assignment(self) -> list[int]:
         return sorted(tp.partition for tp in self._c.assignment())
+
+    def lag(self) -> dict[int, int]:
+        """Per assigned partition: high watermark minus the offset we last committed (A6 broker lag).
+
+        Uses the client's cached watermarks (no broker round trip); before the first commit on a
+        partition, falls back to the group's committed offset."""
+        out: dict[int, int] = {}
+        assigned = list(self._c.assignment())
+        missing = [tp for tp in assigned if tp.partition not in self._committed]
+        if missing:
+            for tp in self._c.committed(missing, timeout=2.0):
+                if tp.offset >= 0:
+                    self._committed[tp.partition] = tp.offset
+        for tp in assigned:
+            _low, high = self._c.get_watermark_offsets(tp, cached=True)
+            if high is None or high < 0:
+                continue
+            out[tp.partition] = max(0, high - self._committed.get(tp.partition, 0))
+        return out
 
     def close(self) -> None:
         self._c.close()

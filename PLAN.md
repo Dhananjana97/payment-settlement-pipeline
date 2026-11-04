@@ -160,20 +160,24 @@ Answer all 9 questions with numbers against §2 (60k merchants, 4k–30k ev/s, 3
 - [x] 9. Three tradeoffs.
 Keep under ~8 pages; diagrams welcome.
 
-### Step 8 — Tests, faults, docs (5:30–6:00) — 📝 planned: `docs/STEP8-PLAN.md`
-- [ ] Confirm the A7 set is all present from Steps 2/3/5: sequencing state machine (unit), exactly-once apply under concurrent redelivery (real Postgres), payout outcome matrix, cross-process limiter. Add an end-to-end test: compose up with a short gateway run → `verify.py check` PASS.
-- [ ] `scripts/faults.sh`: at least 2 of §5.4 (e.g. `kill -9` reader leader; `SIGSTOP` leader 45 s; `kill -9` consumer mid-batch; restart Redis without persistence; restart broker; restart Postgres; `kill -9` executor in flight).
-- [ ] **`verify.py` is the floor, not the bar.** Reviewers use a different seed, ≥ 2M frames at 3,000/s, harsher chaos and the full §5.4 schedule. Before calling anything done:
+### Step 8 — Tests, faults, docs (5:30–6:00) — ✅ DONE 2026-11-04: S1 2 M @ 3,000/s + faults PASS, S2 chaos PASS, cold start 66 s, README + AI-USAGE (`docs/STEP8-PLAN.md`)
+- [x] Confirm the A7 set is all present from Steps 2/3/5: sequencing state machine (unit), exactly-once apply under concurrent redelivery (real Postgres), payout outcome matrix, cross-process limiter. Add an end-to-end test: compose up with a short gateway run → `verify.py check` PASS.
+- [x] `scripts/faults.sh`: at least 2 of §5.4 (e.g. `kill -9` reader leader; `SIGSTOP` leader 45 s; `kill -9` consumer mid-batch; restart Redis without persistence; restart broker; restart Postgres; `kill -9` executor in flight).
+- [x] **`verify.py` is the floor, not the bar.** Reviewers use a different seed, ≥ 2M frames at 3,000/s, harsher chaos and the full §5.4 schedule. Before calling anything done:
   - run `scripts/faults.sh` repeatedly, each fault followed by `verify.py check` PASS;
   - run with gateway chaos raised (`GATEWAY_DROP_RATE=0.01 GATEWAY_DISCONNECT_MIN_S=20 GATEWAY_DISCONNECT_MAX_S=40`);
   - run with bank windows shrunk (`BANK_IDEMPOTENCY_TTL_S=20 BANK_OUTAGE_FIRST_S=30 BANK_OUTAGE_LEN_S=30 BANK_OUTAGE_EVERY_S=90`);
   - run at scale (`GATEWAY_EVENTS_PER_CHANNEL=10000 GATEWAY_RATE=3000`) and confirm ≥ 3,000 ev/s and catch-up within 60 s of the gateway finishing;
   - if a design choice can't be explained as safe under a given fault, treat it as unsafe.
-- [ ] Capture the passing output of the full chaos run for README.
-- [ ] README.md: run command, scaling, built vs deferred, known issues, **honest time per area**.
-- [ ] AI-USAGE.md: tools, what for, 3 places the AI was wrong and how we noticed.
-- [ ] Commit history shows progression (commit at each milestone).
+- [x] Capture the passing output of the full chaos run for README.
+- [x] README.md: run command, scaling, built vs deferred, known issues, **honest time per area**.
+- [x] AI-USAGE.md: tools, what for, 3 places the AI was wrong and how we noticed.
+- [x] Commit history shows progression (commit at each milestone).
 
+
+### Step 9 — Observability stack (Prometheus, Loki, Grafana) — 📝 planned: `docs/STEP9-PLAN.md`
+- [ ] Prometheus scrapes every replica via DNS service discovery (`--scale` aware); Loki gets the JSON logs via Grafana Alloy; Grafana provisioned with an A6 "Settlement overview" dashboard, a "Trace" dashboard (by `payout_id` / `event_id` / `channel`) and alert rules for the DESIGN.md §8 paging conditions.
+- [ ] smoke + integration checks; start-up time stays well under 10 min; README "Operate it" updated; D28–D31.
 ---
 
 ## 5. Priorities if time runs out

@@ -9,11 +9,9 @@ The second test is the same scenario against a real PostgreSQL sequence (needs R
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
-from tests.incumbent.conftest import impls
+from tests.incumbent.conftest import impls, part_c_dsn
 from tests.incumbent.fakes import FakeOutboxDb
 
 
@@ -37,7 +35,7 @@ def test_row_that_commits_after_a_higher_id_is_still_sent(impl):
 @impls("P4")
 def test_row_that_commits_after_a_higher_id_is_still_sent_on_postgres(impl):
     psycopg = pytest.importorskip("psycopg")
-    dsn = os.environ.get("TEST_DATABASE_URL", "postgresql://ledger:ledger@localhost:5432/ledger").replace("+psycopg", "")
+    dsn = part_c_dsn()
     with psycopg.connect(dsn, autocommit=True) as admin:
         admin.execute("DROP TABLE IF EXISTS repro_outbox")
         admin.execute("CREATE TABLE repro_outbox (id bigserial PRIMARY KEY, payout_id text NOT NULL, status text NOT NULL DEFAULT 'accepted')")
