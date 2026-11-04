@@ -352,6 +352,22 @@ Rules, derived from `bank.py`:
 
 **Why.** Fault #6 restarts Postgres. Treating "can't reach the DB" as "lost the lock" drops the session for the outage plus a full failover, for no safety gain: the correctness guard is the gateway epoch (D2), not the lock. **Known race:** after an outage longer than `lease_ttl`, the standby may acquire before the leader's first renew succeeds; the leader then sees `LOST` and a failover happens anyway. Safe (gateway supersede + epoch), just not free.
 
+## D23. API readiness reflects its own dependencies only
+
+**Decision.** The read API's `/readyz` checks PostgreSQL only, with a 1 s timeout, and returns 503 on failure or timeout. It does not check the broker, Redis, the gateway or the bank. Broker and session health are reported by the readers' and consumers' own `/readyz` (role, `session_epoch`, assigned partitions).
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| Postgres + broker (master plan's first draft) | The API never talks to the broker. A broker outage would take the read API out of rotation while every answer it gives is still correct: an outage it is immune to becomes one it causes. |
+| Postgres only, 1 s timeout | — |
+| No readiness check / always 200 | A6 asks for real checks; a hung Postgres would keep routing traffic to an API that can only time out. |
+
+**Why.** Readiness answers "should traffic be sent to this instance?", and only the API's own dependencies decide that. A probe without a timeout is itself a hang risk: the timeout bounds it below the orchestrator's probe period.
+
+**Cost accepted.** An operator looking only at the API's `/readyz` does not see a broker or session problem; they use `/v1/ops/status` and the other services' probes (STEP4-PLAN §2).
+
 ---
 
 ## Changes log
@@ -364,3 +380,4 @@ Rules, derived from `bank.py`:
 | 2026-11-04 | Review validated against `gateway.py`/librdkafka; three notes added: D14 fallback to acked map when Postgres is unreachable, D18 counter expected zero, D20 post-outage race. |
 | 2026-11-04 | D12, D13, D15, D16 recorded after Step 2 build; D13 waste measured at 24.6 %. |
 | 2026-11-04 | Plan review. D4 amended: one transaction per poll batch, not per event (hot-partition throughput). D14 amended: resume from `channel_progress` on every reconnect. D17 credit floor during resend, D18 consumer skip rule, D19 producer recovery + backoff, D20 lock renew tri-state added. Go-back-N waste (D13) to be measured at `GATEWAY_DROP_RATE=0.01` in Step 2 and recorded before DESIGN.md. |
+| 2026-11-04 | D23 added: API readiness checks Postgres only (1 s timeout); master plan's broker check dropped. `as_of` measured at 2 M rows: index scan 0.05 ms, HTTP p99 6–9 ms sequential. |

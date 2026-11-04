@@ -117,9 +117,9 @@ Decisions to write down (they feed DESIGN.md directly):
 - [ ] **Tests:** unit — `domain/rules.py` every row of §4 incl. rejections and ignore; **conformance** — run `harness/ledger_events.py` generated channels through `rules.py` and diff against `apply_event()` per merchant; integration — exactly-once apply under concurrent redelivery on real Postgres (A7: **same batch delivered to two threads → applied once**), contiguity guard skips out-of-order seq and the skipped seq applies when re-delivered, consumer `kill -9` mid-batch replays cleanly.
 - [x] **Milestone:** `verify.py check` passes balances + as_of + platform fees with chaos on (payouts may still be pending). → drain/balance/platform/as_of PASS, as_of p99 8.4 ms.
 
-### Step 4 — Read API (2:30–2:45) — endpoints shipped in Step 1; 📝 hardening planned: `docs/STEP4-PLAN.md`
-- [ ] `GET /v1/merchants/{id}/balance` (+ `last_seq`), `?as_of=` (index lookup, p99 < 50 ms), `GET /v1/platform/balances`, `GET /v1/payouts/{id}` (404 until applied).
-- [ ] `/healthz`, `/readyz` (DB + broker reachable), `/metrics`.
+### Step 4 — Read API (2:30–2:45) — ✅ DONE 2026-11-04: `/v1/ops/status`, `/readyz` timeout, as_of p99 6–9 ms at 2 M rows (`docs/STEP4-PLAN.md`)
+- [x] `GET /v1/merchants/{id}/balance` (+ `last_seq`), `?as_of=` (index lookup, p99 < 50 ms), `GET /v1/platform/balances`, `GET /v1/payouts/{id}` (404 until applied).
+- [x] `/healthz`, `/readyz` (DB + broker reachable), `/metrics`.
 
 ### Step 5 — Payout executors (2:45–3:45)  ← highest-risk area
 - [ ] Shared OAuth token: single holder in Postgres/Redis with lease; refresh ≤ 1 per 5 s; all executors reuse the same token (new token revokes old).

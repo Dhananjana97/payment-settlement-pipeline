@@ -1,13 +1,14 @@
-"""The read API contract (ASSIGNMENT.md:200-214, A6). Routes depend only on the ReadStore port."""
+"""The read API contract (ASSIGNMENT.md:200-214, A6). Routes depend only on the ports."""
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
-from services.api.ports import ReadStore
+from services.api.ports import OpsStore, ReadStore
 from services.common import metrics
 
 
@@ -22,7 +23,10 @@ def parse_as_of(value: str) -> datetime:
     return ts
 
 
-def build_router(store: ReadStore) -> APIRouter:
+READY_TIMEOUT_S = 1.0
+
+
+def build_router(store: ReadStore, ops: OpsStore | None = None) -> APIRouter:
     r = APIRouter()
 
     @r.get("/healthz")
@@ -31,7 +35,11 @@ def build_router(store: ReadStore) -> APIRouter:
 
     @r.get("/readyz")
     async def readyz():
-        ok = await store.ready()
+        # Own dependencies only (D23): the API reads Postgres and never talks to the broker.
+        try:
+            ok = await asyncio.wait_for(store.ready(), READY_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            return JSONResponse({"ready": False, "postgres": False, "error": "timeout"}, status_code=503)
         body = {"ready": ok, "postgres": ok}
         return JSONResponse(body, status_code=200 if ok else 503)
 
@@ -51,6 +59,11 @@ def build_router(store: ReadStore) -> APIRouter:
         if row is None:
             raise HTTPException(status_code=404, detail="payout not applied yet")
         return row
+
+    if ops is not None:
+        @r.get("/v1/ops/status")
+        async def ops_status():
+            return await ops.status()
 
     @r.get("/metrics")
     async def prom_metrics():

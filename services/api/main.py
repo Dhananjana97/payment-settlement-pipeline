@@ -3,18 +3,19 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
+from services.api.adapters.pg_ops_store import PgOpsStore
 from services.api.adapters.pg_read_store import PgReadStore
-from services.api.ports import ReadStore
+from services.api.ports import OpsStore, ReadStore
 from services.api.routes import build_router, timing_middleware
 from services.common.config import Settings
 from services.common.db import async_engine
 from services.common.log import configure, get_logger
 
 
-def create_app(store: ReadStore) -> FastAPI:
+def create_app(store: ReadStore, ops: OpsStore | None = None) -> FastAPI:
     app = FastAPI(title="Settlement Stream read API", docs_url=None, redoc_url=None)
     app.middleware("http")(timing_middleware)
-    app.include_router(build_router(store))
+    app.include_router(build_router(store, ops))
     return app
 
 
@@ -22,7 +23,8 @@ def create_default_app() -> FastAPI:
     settings = Settings.from_env("api")
     configure(settings.log_level)
     get_logger("api", instance=settings.instance_id).info("api starting", port=settings.api_port)
-    return create_app(PgReadStore(async_engine(settings)))
+    eng = async_engine(settings)
+    return create_app(PgReadStore(eng), PgOpsStore(eng))
 
 
 if __name__ == "__main__":
