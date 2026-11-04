@@ -10,8 +10,10 @@ import os
 import pytest
 from sqlalchemy import text
 
+# Tests get their own database (`ledger_test`), created on demand, so they never truncate or
+# deadlock against the live stack's `ledger` database on the same Postgres.
 TEST_ENV = {
-    "DATABASE_URL": os.environ.get("TEST_DATABASE_URL", "postgresql+psycopg://ledger:ledger@localhost:5432/ledger"),
+    "DATABASE_URL": os.environ.get("TEST_DATABASE_URL", "postgresql+psycopg://ledger:ledger@localhost:5432/ledger_test"),
     "KAFKA_BOOTSTRAP": os.environ.get("TEST_KAFKA_BOOTSTRAP", "localhost:19092"),
     "REDIS_URL": os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/0"),
     "GATEWAY_HOST": "localhost",
@@ -53,11 +55,31 @@ def session_settings():
     return Settings.from_env("test")
 
 
+def _ensure_database(dsn: str) -> None:
+    """CREATE DATABASE <name> if it does not exist (connects to the maintenance DB)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    url = make_url(dsn)
+    name = url.database
+    if name == "ledger":
+        raise RuntimeError("refusing to run tests against the live 'ledger' database; use a *_test database")
+    admin = create_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT", pool_pre_ping=True)
+    try:
+        with admin.connect() as conn:
+            exists = conn.execute(text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": name}).scalar()
+            if not exists:
+                conn.execute(text(f'CREATE DATABASE "{name}"'))
+    finally:
+        admin.dispose()
+
+
 @pytest.fixture(scope="session")
 def engine(session_settings):
     from services.common.db import engine as make_engine
 
-    eng = make_engine(session_settings, pool_size=2, max_overflow=2)
+    _ensure_database(session_settings.dsn)
+    eng = make_engine(session_settings, pool_size=4, max_overflow=4)
     yield eng
     eng.dispose()
 
