@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from services.common.models import PAYOUT_PUBLIC_STATUS, LedgerHistory, Merchant, Payout, PlatformFee
+from services.common.models import PAYOUT_PUBLIC_STATUS, ChannelProgress, LedgerHistory, Merchant, Payout, PlatformFee
 
 
 class PgReadStore:
@@ -22,20 +22,26 @@ class PgReadStore:
             return False
 
     async def balance(self, merchant_id: str) -> dict:
-        m = Merchant.__table__.c
-        stmt = select(m.currency, m.settled_minor, m.held_minor, m.reserve_minor, m.last_seq).where(
-            m.merchant_id == merchant_id
+        m = Merchant.__table__
+        cp = ChannelProgress.__table__
+        # last_seq comes from channel_progress: it advances on NOTICE/GAP_FILL too, possibly before any
+        # merchant row exists. A merchant with progress but no row (only notices so far) still gets 200.
+        stmt = (
+            select(m.c.currency, m.c.settled_minor, m.c.held_minor, m.c.reserve_minor, cp.c.last_seq)
+            .select_from(m.outerjoin(cp, cp.c.channel == m.c.merchant_id))
+            .where(m.c.merchant_id == merchant_id)
         )
         async with self._eng.connect() as conn:
             row = (await conn.execute(stmt)).first()
-        if row is None:
-            # Unknown merchant: zeros rather than 404, because verify.py polls /balance for every
-            # channel while draining and treats non-200 as a failure (verify.py:107-110).
-            return {"merchant_id": merchant_id, "currency": None, "settled_minor": 0, "held_minor": 0,
-                    "available_minor": 0, "last_seq": 0}
+            if row is None:
+                last_seq = (await conn.execute(select(cp.c.last_seq).where(cp.c.channel == merchant_id))).scalar()
+                # Unknown merchant: zeros rather than 404, because verify.py polls /balance for every
+                # channel while draining and treats non-200 as a failure (verify.py:107-110).
+                return {"merchant_id": merchant_id, "currency": None, "settled_minor": 0, "held_minor": 0,
+                        "available_minor": 0, "last_seq": int(last_seq or 0)}
         currency, settled, held, reserve, last_seq = row
-        return {"merchant_id": merchant_id, "currency": currency, "settled_minor": settled, "held_minor": held,
-                "available_minor": settled - reserve, "last_seq": last_seq}
+        return {"merchant_id": merchant_id, "currency": currency or None, "settled_minor": settled,
+                "held_minor": held, "available_minor": settled - reserve, "last_seq": int(last_seq or 0)}
 
     async def balance_as_of(self, merchant_id: str, as_of: datetime) -> dict:
         h = LedgerHistory.__table__.c

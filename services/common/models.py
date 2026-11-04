@@ -40,7 +40,6 @@ class Merchant(Base):
     bank_account: Mapped[str] = mapped_column(String(64), nullable=False)
     settled_minor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
     held_minor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
-    last_seq: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
 
 
 class Auth(Base):
@@ -64,6 +63,7 @@ class Capture(Base):
 class ProcessedEvent(Base):
     """Exactly-once guard (D4): inserted in the same transaction as the effect."""
     __tablename__ = "processed_events"
+    __table_args__ = (Index("ix_processed_events_applied_at", "applied_at"),)
 
     event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     channel: Mapped[str] = mapped_column(String(32), nullable=False)

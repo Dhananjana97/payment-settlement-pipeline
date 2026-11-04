@@ -106,7 +106,7 @@ Decisions to write down (they feed DESIGN.md directly):
 - [x] **Tests:** unit — `domain/sequencer.py` every branch (gap, lost resend, `GAP_FILL`, dup with either `poss_dup`, reconnect/resume, credit accounting, **credit floor at the unacked cap with an open gap**); app — reader with `FakeGateway` + `InMemoryPublisher` + `FakeClock` (failover, superseded, heartbeat timing, **delivery error → new producer + resume from checkpoint**, **renew UNAVAILABLE keeps the session, LOST drops it**); integration — `BospClient` against the real `gateway.py` with chaos on, `RedpandaProducer` ack ordering, **Postgres stopped 5 s mid-session → same holder afterwards**. **Done:** 84 unit (sequencer 30, liveness 5, messages 8, app 13), 13 integration (bosp client 5, pg lock/fence/checkpoint 5, migrations 3); e2e 383,490 msgs / 200 channels / 45 s (8,477/s), no holes.
 - [x] **Cut line (75 min):** sequencer unit tests + one e2e run are mandatory; remaining app/integration tests are optional if time is short.
 
-### Step 3 — Ledger consumers (2:00–2:30) — 📝 planned: `docs/STEP3-PLAN.md`
+### Step 3 — Ledger consumers (2:00–2:30) — 🔧 built, milestone verify pending (`docs/STEP3-PLAN.md`)
 - [ ] Consume from broker in partition order; **one transaction per poll batch per partition** (≤ 200 records or 50 ms; D4 amended), `consumer_batch_size` histogram.
 - [ ] Per event inside the batch: `INSERT processed_events ON CONFLICT DO NOTHING` → if inserted, apply §4 rule (AUTH / AUTH_EXPIRY / CAPTURE / REFUND / CHARGEBACK / PAYOUT_REQUEST / MERCHANT_CONFIG / unknown=ignore), write `ledger_history` row, update `channel_progress.last_seq` (contiguity enforced), insert `payouts` row if accepted. Commit the batch → then commit broker offset (at-least-once + idempotent = effectively-once).
 - [ ] Out-of-order seq → **skip, commit, count** `consumer_out_of_order_total{channel}`; never park (D18; safe because of D14 amended).
@@ -117,7 +117,7 @@ Decisions to write down (they feed DESIGN.md directly):
 - [ ] **Tests:** unit — `domain/rules.py` every row of §4 incl. rejections and ignore; **conformance** — run `harness/ledger_events.py` generated channels through `rules.py` and diff against `apply_event()` per merchant; integration — exactly-once apply under concurrent redelivery on real Postgres (A7: **same batch delivered to two threads → applied once**), contiguity guard skips out-of-order seq and the skipped seq applies when re-delivered, consumer `kill -9` mid-batch replays cleanly.
 - [ ] **Milestone:** `verify.py check` passes balances + as_of + platform fees with chaos on (payouts may still be pending).
 
-### Step 4 — Read API (2:30–2:45) — endpoints already shipped in Step 1; reclaim this slot for Step 3 batching or Part C
+### Step 4 — Read API (2:30–2:45) — endpoints shipped in Step 1; 📝 hardening planned: `docs/STEP4-PLAN.md`
 - [ ] `GET /v1/merchants/{id}/balance` (+ `last_seq`), `?as_of=` (index lookup, p99 < 50 ms), `GET /v1/platform/balances`, `GET /v1/payouts/{id}` (404 until applied).
 - [ ] `/healthz`, `/readyz` (DB + broker reachable), `/metrics`.
 

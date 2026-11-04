@@ -45,8 +45,10 @@ def test_bad_as_of_is_400(client):
 def test_contract_with_rows(client, engine):
     with engine.begin() as conn:
         conn.execute(text(
-            "INSERT INTO merchants (merchant_id, currency, reserve_minor, bank_account, settled_minor, held_minor, last_seq) "
-            "VALUES ('M-0001', 'USD', 5000, 'ACCT-1', 120000, 30000, 42)"))
+            "INSERT INTO merchants (merchant_id, currency, reserve_minor, bank_account, settled_minor, held_minor) "
+            "VALUES ('M-0001', 'USD', 5000, 'ACCT-1', 120000, 30000)"))
+        conn.execute(text(
+            "INSERT INTO channel_progress (channel, last_seq, epoch) VALUES ('M-0001', 42, 1), ('M-0002', 3, 1)"))
         conn.execute(text(
             "INSERT INTO ledger_history (merchant_id, seq, event_time, settled_minor, held_minor, reserve_minor) VALUES "
             "('M-0001', 1, '2026-11-01T10:00:00.000Z', 0, 50000, 0), "
@@ -77,6 +79,10 @@ def test_contract_with_rows(client, engine):
     assert as_of("2026-11-01T10:00:05.500Z")["settled_minor"] == 48000
     assert as_of("2026-11-01T10:01:00.000Z") == {"merchant_id": "M-0001", "settled_minor": 120000, "held_minor": 30000, "available_minor": 115000}
     assert as_of("2027-01-01T00:00:00.000Z")["available_minor"] == 115000
+
+    # progress without a merchant row (only NOTICEs so far): zeros but the real last_seq
+    b2 = client.get("/v1/merchants/M-0002/balance").json()
+    assert b2["last_seq"] == 3 and b2["settled_minor"] == 0 and set(b2) == BALANCE_FIELDS
 
     assert client.get("/v1/platform/balances").json() == {"USD": 350, "EUR": 7}
 

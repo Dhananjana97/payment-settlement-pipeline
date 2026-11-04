@@ -30,6 +30,9 @@ consumer_events_total = Counter("consumer_events_total", "events seen by outcome
 consumer_partition_lag = Gauge("consumer_partition_lag", "broker high-watermark minus committed offset", ["partition"], registry=REGISTRY)
 consumer_apply_seconds = Histogram("consumer_apply_seconds", "apply transaction latency", registry=REGISTRY,
                                    buckets=(0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5, 1, 2.5))
+consumer_batch_size = Histogram("consumer_batch_size", "records per apply batch (per partition)", registry=REGISTRY,
+                                buckets=(1, 5, 10, 25, 50, 100, 200, 500))
+consumer_batches_total = Counter("consumer_batches_total", "apply batches by result", ["result"], registry=REGISTRY)
 consumer_stale_epoch_total = Counter("consumer_stale_epoch_total", "messages rejected for a stale session_epoch", registry=REGISTRY)
 consumer_out_of_order_total = Counter("consumer_out_of_order_total", "messages parked because seq != last_seq+1", registry=REGISTRY)
 

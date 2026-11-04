@@ -186,12 +186,22 @@ python harness/verify.py check --api http://localhost:8081            # drain/ba
 Then: `docker exec <consumer> python -c "import os,signal;os.kill(1,9)"`-style kill of one consumer mid-run (via `scripts/faults.sh kill-consumer`), `docker compose up -d --scale consumer=6`, re-check.
 
 ## 5. Checklist
-- [ ] `domain/effects.py`, `domain/rules.py` + `test_rules.py` + `test_conformance.py`  (agent A)
-- [ ] `ports.py`, `adapters/pg_ledger_store.py`, `adapters/redpanda_consumer.py`, `app.py`, `main.py`, migration 0003, API `last_seq` join + `test_pg_ledger_store.py`, `test_app.py`, `test_consumer_e2e.py`  (agent B)
-- [ ] `scripts/faults.sh kill-consumer` + `scale-consumers N` subcommands  (agent B)
+- [x] `domain/effects.py`, `domain/rules.py` + `test_rules.py` + `test_conformance.py`  (agent A)
+- [x] `ports.py`, `adapters/pg_ledger_store.py`, `adapters/redpanda_consumer.py`, `app.py`, `main.py`, migration 0003, API `last_seq` join + `test_pg_ledger_store.py`, `test_app.py`, `test_consumer_e2e.py`  (agent B)
+- [x] `scripts/faults.sh kill-consumer` + `scale-consumers N` subcommands  (agent B)
 - [ ] unit + integration green; milestone run recorded here; fault run recorded
 - [ ] DECISIONS.md: D21 (stale-epoch skip rule), D22 (out-of-order leaves no processed_events row)
 - [ ] commit on `feature/step-3-ledger-consumer`, PR, tick PLAN.md
+
+## Execution notes (2026-11-04)
+
+- **Domain:** `rules.py` mirrors `apply_event` L165–215. 31 unit tests. Conformance replay of the full generator (200 merchants × 2,500 frames: 475,144 DATA events, 1,868 payouts) matches `apply_event` exactly in 13.5 s. Followed the code over the prose in four places: CHARGEBACK can repeat; the platform fee is keyed by the book's currency, which may be ""; MERCHANT_CONFIG fixes currency only when it is empty; malformed fields give `rejected:malformed_event` (our addition, so a poison event can't kill the consumer).
+- **Store:** applying per-record SQL gave ~270 ev/s, so the store was rewritten to dedupe, lock, apply in memory and write back in bulk per batch, with the same semantics. `BatchConflict` (the checkpoint moved under the batch) is retried by the app.
+- **Throughput:** store alone ~1,700 ev/s single-threaded at batch 200; live with 4 consumers ~4,600 applied ev/s; group lag went from 124k to 0 in ~40 s. The live DB drained the whole gateway run (Σ last_seq = 500,000).
+- **Tests:** 121 unit; integration green (store: concurrent double-apply → once, crash mid-batch → replay identical, out-of-order skip then apply, stale epoch, history rows for rejected/ignored, fee shard = partition; consumer e2e vs `apply_event`).
+- **Test isolation fix:** the integration session fixture used to run `downgrade base` on the live `ledger` database, which wiped it mid-run. Tests now create and use `ledger_test` and refuse to run against `ledger`. `tests/incumbent/test_p4_outbox_cursor_skips_late_commit.py` (Part C) still defaults to the live DB and must be repointed.
+- **Open:** one consumer counted 3,400 `out_of_order` messages, where D18 expects zero. Likely leftovers in the topic from the period when the live DB was wiped and rebuilt; to be confirmed on the fresh-stack milestone run. 2.9 M `stale_epoch` skips are old-session messages in the topic (expected).
+- **Pending:** milestone `verify.py check` on a fresh stack; full `faults.sh kill-consumer` + `scale-consumers 6` run (the kill/restart worked; the scale run was interrupted).
 
 ## 6. Deferred
 - Per-merchant daily payout limit, `CHANNEL_RESET`: new effect / new rule branch in `rules.py` (debrief).

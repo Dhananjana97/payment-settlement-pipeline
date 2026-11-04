@@ -1,9 +1,11 @@
-"""Consumer ports: the broker stream and the ledger store."""
+"""Consumer ports: the broker stream and the ledger store (STEP3-PLAN §3.2)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Callable, Protocol
+from typing import Protocol
+
+OUTCOMES = ("applied", "ignored", "duplicate", "stale_epoch", "out_of_order", "malformed", "progress")
+# plus "rejected:<reason>" strings from the rules
 
 
 @dataclass(frozen=True)
@@ -16,24 +18,28 @@ class Record:
 
 @dataclass(frozen=True)
 class Outcome:
-    """Result of applying one frame. `status` is one of:
-    applied | rejected:<reason> | ignored | duplicate | stale_epoch | out_of_order"""
-    status: str
-    event_id: str | None = None
+    partition: int
+    offset: int
+    status: str                      # applied | rejected:<reason> | ignored | duplicate | stale_epoch | out_of_order | malformed | progress
+    channel: str | None
+    seq: int | None
+
+    @property
+    def outcome_class(self) -> str:
+        """Label for metrics: collapses rejected:<reason> to 'rejected'."""
+        return "rejected" if self.status.startswith("rejected:") else self.status
 
 
 class EventStream(Protocol):
-    def poll(self, timeout_s: float, max_records: int) -> list[Record]: ...
+    def poll(self, max_records: int, timeout_s: float) -> list[Record]: ...
     def commit(self, partition: int, next_offset: int) -> None: ...
-    def on_rebalance(self, assigned: Callable[[list[int]], None], revoked: Callable[[list[int]], None]) -> None: ...
+    def assignment(self) -> list[int]: ...
     def close(self) -> None: ...
 
 
 class LedgerStore(Protocol):
-    """All writes happen in `apply`, in one transaction (D4). Reads back the API."""
+    def apply_batch(self, partition: int, records: list[Record], fence_epoch: int) -> list[Outcome]:
+        """One transaction. Returns one Outcome per record, in order."""
+        ...
 
-    def apply(self, message: dict, shard: int) -> Outcome: ...
-    def balance(self, merchant_id: str) -> dict: ...
-    def balance_as_of(self, merchant_id: str, as_of: datetime) -> dict: ...
-    def platform_totals(self) -> dict[str, int]: ...
-    def payout(self, payout_id: str) -> dict | None: ...
+    def fence_epoch(self) -> int: ...

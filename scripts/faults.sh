@@ -5,7 +5,9 @@
 #   scripts/faults.sh kill-leader            # §5.4 #1: kill -9 the leader; measure failover
 #   scripts/faults.sh pause-leader [45]      # §5.4 #2: SIGSTOP the leader N s, then SIGCONT
 #   scripts/faults.sh restart-postgres       # §5.4 #6: fast restart of Postgres
-#   scripts/faults.sh all                    # the three above, 10 s apart
+#   scripts/faults.sh kill-consumer          # §5.4 #3: kill -9 one ledger consumer mid-batch
+#   scripts/faults.sh scale-consumers N      # §5.4 #3: add consumers (rebalance)
+#   scripts/faults.sh all                    # reader faults, then kill-consumer + scale 6, 10 s apart
 #
 # Signals are delivered to the reader *process*, not the container:
 #   kill -9  -> `docker exec` a one-liner that SIGKILLs the `services.reader.main` process. The
@@ -23,13 +25,17 @@ since(){ printf '%.1f' "$(echo "$(now) - $1" | bc)"; }
 pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; exit 1; }
 
-# SIGKILL every process whose cmdline mentions the reader module (never PID 1 / tini).
-KILL_WORKER='import os,signal
+# SIGKILL every process whose cmdline mentions the given module (never PID 1 / tini).
+kill_worker_py() { cat <<PY
+import os,signal
 for p in os.listdir("/proc"):
     if p.isdigit() and int(p) != 1:
         try: cmd = open(f"/proc/{p}/cmdline","rb").read()
         except OSError: continue
-        if b"services.reader.main" in cmd: os.kill(int(p), signal.SIGKILL)'
+        if b"$1" in cmd: os.kill(int(p), signal.SIGKILL)
+PY
+}
+KILL_WORKER=$(kill_worker_py services.reader.main)
 
 holder() {  # hostname:pid:nonce of the live lease holder, or empty
   docker compose exec -T postgres psql -U ledger -d ledger -tAc \
@@ -127,15 +133,70 @@ cmd_restart_postgres() {
   pass "same leader across postgres restart (D20)"
 }
 
+applied_count() {
+  docker compose exec -T postgres psql -U ledger -d ledger -tAc "select count(*) from processed_events" 2>/dev/null || echo 0
+}
+wait_healthy() {  # $1 = service, $2 = max seconds
+  local i id ok
+  for i in $(seq 1 "$2"); do
+    ok=1
+    for id in $(docker compose ps -q "$1"); do
+      [ "$(docker inspect -f '{{.State.Health.Status}}' "$id")" = "healthy" ] || ok=0
+    done
+    [ "$ok" = 1 ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+cmd_kill_consumer() {
+  echo "== kill -9 one ledger consumer  ($(ts))"
+  local c; c=$(docker compose ps -q consumer | head -1)
+  local rc0; rc0=$(docker inspect -f '{{.RestartCount}}' "$c")
+  local before; before=$(applied_count)
+  echo "  target $(name_of "$c"); processed_events before: $before"
+  local t0; t0=$(now)
+  docker exec "$c" python -c "$(kill_worker_py services.consumer.main)" >/dev/null 2>&1 || true
+  sleep 3
+  local st rc1; st=$(docker inspect -f '{{.State.Status}}' "$c"); rc1=$(docker inspect -f '{{.RestartCount}}' "$c")
+  [ "$st" = "running" ] && [ "$rc1" -gt "$rc0" ] || fail "consumer not restarted (status=$st restarts=$rc0->$rc1)"
+  echo "  container restarted (restarts $rc0 -> $rc1) after $(since "$t0")s"
+  wait_healthy consumer 30 || fail "consumers not all healthy within 30 s"
+  local parts; parts=$(docker exec "$c" python -c "import urllib.request,json;print(json.load(urllib.request.urlopen('http://localhost:9100/readyz'))['partitions'])" 2>/dev/null || echo "?")
+  echo "  restarted consumer partitions: $parts"
+  local after; after=$(applied_count)
+  echo "  processed_events after: $after"
+  local errs; errs=$(docker compose logs --no-log-prefix --since 30s consumer 2>/dev/null | grep -c '"level":"ERROR"' || true)
+  [ "${errs:-0}" = "0" ] || fail "$errs ERROR log lines from consumers after the kill"
+  pass "consumer kill -9: restarted, healthy, no errors"
+}
+
+cmd_scale_consumers() {
+  local n=${1:-6}
+  echo "== scale consumers to $n  ($(ts))"
+  docker compose up -d --scale consumer="$n" --no-recreate consumer >/dev/null 2>&1
+  wait_healthy consumer 60 || fail "not all $n consumers healthy within 60 s"
+  local got; got=$(docker compose ps -q consumer | wc -l)
+  [ "$got" = "$n" ] || fail "expected $n consumers, have $got"
+  sleep 5
+  local errs; errs=$(docker compose logs --no-log-prefix --since 20s consumer 2>/dev/null | grep -c '"level":"ERROR"' || true)
+  [ "${errs:-0}" = "0" ] || fail "$errs ERROR log lines during rebalance"
+  pass "$n consumers healthy after rebalance, no errors"
+}
+
 case "${1:-}" in
   leader)            cmd_leader ;;
   kill-leader)       cmd_kill_leader ;;
   pause-leader)      cmd_pause_leader "${2:-45}" ;;
   restart-postgres)  cmd_restart_postgres ;;
+  kill-consumer)     cmd_kill_consumer ;;
+  scale-consumers)   cmd_scale_consumers "${2:-6}" ;;
   all)
     cmd_kill_leader;       echo "  settling 10 s"; sleep 10
     cmd_pause_leader 45;   echo "  settling 10 s"; sleep 10
-    cmd_restart_postgres
+    cmd_restart_postgres;  echo "  settling 10 s"; sleep 10
+    cmd_kill_consumer;     echo "  settling 10 s"; sleep 10
+    cmd_scale_consumers 6
     echo "== FAULTS: PASS" ;;
-  *) sed -n '2,13p' "$0"; exit 2 ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
 esac
