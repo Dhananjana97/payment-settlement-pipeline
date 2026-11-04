@@ -147,17 +147,17 @@ Decisions to write down (they feed DESIGN.md directly):
   - 9 accepted-but-never-sent payouts (hint: outbox row claimed then crashed with no lease expiry; executor "stopped for 40 min" = stuck token/limiter; PgBouncer transaction pooling + session-level state).
 - [x] Executable reproducers for top 5 in `tests/incumbent/`: each fails against extracted incumbent logic and passes against the fix. 45 defects in `REVIEW.md`; 5 + 3 bonus reproducers (strict xfail vs incumbent, pass vs fix); P4 also on real Postgres.
 
-### Step 7 — Part B: DESIGN.md (4:45–5:30) — 📝 planned: `docs/STEP7-PLAN.md`
+### Step 7 — Part B: DESIGN.md (4:45–5:30) — ✅ DONE 2026-11-04: `DESIGN.md` (~5,000 words, all 9 questions, every number sourced; drafts + measurements in `docs/design/`)
 Answer all 9 questions with numbers against §2 (60k merchants, 4k–30k ev/s, 3B rows, 50 req/s bank, 1.5M month-end payouts):
-- [ ] 1. Delivery semantics hop by hop (mechanism + when written vs effect).
-- [ ] 2. Fencing walkthrough (SIGSTOP 45 s scenario), fencing token, why TTL lock is insufficient.
-- [ ] 3. Backpressure at 30k→10k/s for 10 min: backlog location/size, memory bounds, credit's role.
-- [ ] 4. Partitioning & skew: partition count/key, hot merchant, >1 session with 16 client_ids, channel reassignment.
-- [ ] 5. Postgres at 3B rows: partitioning, as_of index + write cost, HOT/vacuum/bloat, WAL/day estimate, `synchronous_commit`/fsync, pooling mode and what it forbids.
-- [ ] 6. Isolation level per transaction + one concrete READ COMMITTED anomaly with interleaving.
-- [ ] 7. Payout maths (1.5M / 50 req/s ≈ 8.3 h drain → backlog, who waits longest), ambiguity state machine, residual double-pay risk + detection.
-- [ ] 8. Failure modes: Redis lost, async-replica failover, partition-leader loss, checkpoint older than 72 h, poison event.
-- [ ] 9. Three tradeoffs.
+- [x] 1. Delivery semantics hop by hop (mechanism + when written vs effect).
+- [x] 2. Fencing walkthrough (SIGSTOP 45 s scenario), fencing token, why TTL lock is insufficient.
+- [x] 3. Backpressure at 30k→10k/s for 10 min: backlog location/size, memory bounds, credit's role.
+- [x] 4. Partitioning & skew: partition count/key, hot merchant, >1 session with 16 client_ids, channel reassignment.
+- [x] 5. Postgres at 3B rows: partitioning, as_of index + write cost, HOT/vacuum/bloat, WAL/day estimate, `synchronous_commit`/fsync, pooling mode and what it forbids.
+- [x] 6. Isolation level per transaction + one concrete READ COMMITTED anomaly with interleaving.
+- [x] 7. Payout maths (1.5M / 50 req/s ≈ 8.3 h drain → backlog, who waits longest), ambiguity state machine, residual double-pay risk + detection.
+- [x] 8. Failure modes: Redis lost, async-replica failover, partition-leader loss, checkpoint older than 72 h, poison event.
+- [x] 9. Three tradeoffs.
 Keep under ~8 pages; diagrams welcome.
 
 ### Step 8 — Tests, faults, docs (5:30–6:00)
