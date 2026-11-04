@@ -80,12 +80,15 @@ Decisions to write down (they feed DESIGN.md directly):
 **Rule adopted:** verify every fact in the implementing code, cite `file:line`; docs and comments are pointers only.
 
 > **Tracking:** this file is the master plan. Each step gets a detailed plan in `docs/STEPn-PLAN.md`; when a step finishes, tick it here and link its outputs.
+> **Rules for every step:** verify facts in code, not docs · ports & adapters for anything swappable · unit + integration tests ship with the step's code, listed in its plan, green before commit.
 
-### Step 1 — Skeleton & infra (0:45–1:15)
-- [ ] `docker-compose.yml`: include harness; add postgres, redis, broker, reader ×2, consumer ×4, executor ×2, api. Document `--scale` per service.
-- [ ] `services/common/`: config, structured JSON logging (fields `event_id`, `payout_id`, `session_epoch`), DB pool, metrics registry.
-- [ ] `schema.sql` applied on startup: `merchants`, `auths`, `captures`, `processed_events`, `ledger_history`, `channel_progress`, `platform_fees`, `payouts`, `reader_sessions` (epoch fencing).
-- [ ] Smoke: `docker compose up` brings everything up healthy.
+### Step 1 — Skeleton & infra (0:45–1:15) — ✅ DONE 2026-11-04 (`docs/STEP1-PLAN.md`)
+- [x] `docker-compose.yml`: include harness; postgres 16, redis 7 (non-durable), redpanda + topic init (12 partitions), migrate one-shot, reader ×2, consumer ×4, executor ×2, api. Host ports parameterised; `--scale` documented in the file header.
+- [x] `services/common/`: config (typed, validated, secrets out of repr), JSON logging with `event_id`/`payout_id`/`session_epoch`, SQLAlchemy engines, health server, metrics registry, Clock port.
+- [x] Schema as SQLAlchemy models + Alembic `0001_initial`: 11 tables, all money `BigInteger`, `payouts.status` CHECK, `as_of` index.
+- [x] Ports defined for every swappable piece (`common/ports.py`, `reader|consumer|executor|api/ports.py`).
+- [x] Read API endpoints implemented for real (6 routes) over a `ReadStore` port.
+- [x] Tests: 26 unit + 6 integration green; `scripts/smoke.sh` PASS with 16 healthy containers.
 
 ### Step 2 — Session reader (1:15–2:00)
 - [ ] BOSP framing: uint32 BE length prefix, partial reads, discard partial frame on disconnect.
@@ -96,6 +99,7 @@ Decisions to write down (they feed DESIGN.md directly):
 - [ ] Leader election (Redis lock with TTL for liveness only) + **fencing by `session_epoch`** persisted in Postgres; standby takes over within 15 s on leader death; superseded/old-epoch leader must stop publishing.
 - [ ] Publish to broker keyed by `merchant_id` with `session_epoch`, `seq`, `event` in payload; `NOTICE`/`GAP_FILL` published as progress markers (they advance `last_seq`).
 - [ ] Metrics: session holder + epoch, gaps, resends, per-channel lag, reconnects.
+- [ ] **Tests:** unit — `domain/sequencer.py` every branch (gap, lost resend, `GAP_FILL`, dup with either `poss_dup`, reconnect/resume, credit accounting); app — reader with `FakeGateway` + `InMemoryPublisher` + `FakeClock` (failover, superseded, heartbeat timing); integration — `BospClient` against the real `gateway.py` with chaos on, `RedpandaProducer` ack ordering.
 
 ### Step 3 — Ledger consumers (2:00–2:30)
 - [ ] Consume from broker in partition order; batch per partition.
@@ -103,6 +107,7 @@ Decisions to write down (they feed DESIGN.md directly):
 - [ ] Reject stale epochs (fencing check at the DB hop).
 - [ ] Platform fees sharded (no single hot row).
 - [ ] Survive: consumer `kill -9` mid-batch, broker restart, rebalance/scale-out.
+- [ ] **Tests:** unit — `domain/rules.py` every row of §4 incl. rejections and ignore; **conformance** — run `harness/ledger_events.py` generated channels through `rules.py` and diff against `apply_event()` per merchant; integration — exactly-once apply under concurrent redelivery on real Postgres (A7), contiguity guard rejects out-of-order seq, consumer `kill -9` mid-batch replays cleanly.
 - [ ] **Milestone:** `verify.py check` passes balances + as_of + platform fees with chaos on (payouts may still be pending).
 
 ### Step 4 — Read API (2:30–2:45)
@@ -124,6 +129,7 @@ Decisions to write down (they feed DESIGN.md directly):
   - `502 bad_gateway` / timeout → **ambiguous**: search by reference (after ≥ 3 s), paid if found; if not found **and** key may have expired (> 120 s / maintenance longer than TTL) → search again, then retry with a **new** key only after confirmed absent.
 - [ ] Persist every state transition before/after each bank call (crash at any point must be recoverable without a second execution).
 - [ ] Metrics: payouts by state incl. ambiguous/unknown; bank error classes.
+- [ ] **Tests:** unit — `domain/payout_fsm.py` every row of the `BANK-API.md` table as verified in `bank.py` (A7 outcome matrix), key-age boundary, `account_closed` terminal; app — executor with `FakeBank` + `FakeClock` driving timeout→same-key→replay and maintenance→ambiguous→search→new-key paths, crash-at-every-transition replay; integration — `claim()` with `SKIP LOCKED` under 2 executors, cross-process limiter (A7), `HttpBank` against the real `bank.py` incl. shrunk windows.
 - [ ] **Milestone:** `verify.py check` → `RESULT: PASS` with default bank chaos, then with shrunk windows (`BANK_IDEMPOTENCY_TTL_S=20 BANK_OUTAGE_FIRST_S=30 BANK_OUTAGE_LEN_S=30 BANK_OUTAGE_EVERY_S=90`).
 
 ### Step 6 — Part C: REVIEW.md + reproducers (3:45–4:45)
@@ -148,7 +154,7 @@ Answer all 9 questions with numbers against §2 (60k merchants, 4k–30k ev/s, 3
 Keep under ~8 pages; diagrams welcome.
 
 ### Step 8 — Tests, faults, docs (5:30–6:00)
-- [ ] Tests (A7): sequencing state machine (unit), exactly-once apply under concurrent redelivery (real Postgres), payout outcome matrix, cross-process limiter.
+- [ ] Confirm the A7 set is all present from Steps 2/3/5: sequencing state machine (unit), exactly-once apply under concurrent redelivery (real Postgres), payout outcome matrix, cross-process limiter. Add an end-to-end test: compose up with a short gateway run → `verify.py check` PASS.
 - [ ] `scripts/faults.sh`: at least 2 of §5.4 (e.g. `kill -9` reader leader; `SIGSTOP` leader 45 s; `kill -9` consumer mid-batch; restart Redis without persistence; restart broker; restart Postgres; `kill -9` executor in flight).
 - [ ] **`verify.py` is the floor, not the bar.** Reviewers use a different seed, ≥ 2M frames at 3,000/s, harsher chaos and the full §5.4 schedule. Before calling anything done:
   - run `scripts/faults.sh` repeatedly, each fault followed by `verify.py check` PASS;
