@@ -246,23 +246,30 @@ Logging: every session event carries `session_epoch`; drops/resends carry `chann
 ### Integration (`tests/integration/reader/`, compose infra up)
 - `test_bosp_client.py`: logon with `client_id="test-"+uuid` against the real gateway; LOGON_ACK fields; grant credit on one channel; receive ≥ 1 DATA; heartbeat for 6 s without being dropped; bad secret → `LogonRejected(bad_credentials)`; second logon same id → first gets `LOGOUT superseded`.
 - `test_pg_lock_fence.py`: two holders contend; TTL expiry hands over; renew after loss returns `LOST`; renew with the engine pointed at a closed port returns `UNAVAILABLE`; fence claim is monotonic.
-- `test_reader_e2e.py` second run with `GATEWAY_DROP_RATE=0.01`: record `dropped_ahead / delivered` here under D13 (decision rule: > 50 % on hot channels → buffer ahead-of-gap frames in Step 8).
+- Go-back-N waste (D13), measured on the real gateway at the default drop rate with the stream at full speed (the gateway had finished releasing, so a fresh session pulls everything as fast as credit allows): one session delivered 84,921 frames and dropped 20,893 ahead-of-gap → **24.6 %**. Also 396 duplicate drops, 154 gaps, 52 timed-out resends. Under the 50 % rule → **no buffering** in Step 8.
 - `test_reader_e2e.py`: run `ReaderApp` with its own `client_id` and topic `test-ledger-events-<uuid>` for 60 s against the chaos gateway and real Redpanda; stop; consume the topic; assert per channel: seqs seen cover `1..max` with no holes (duplicates allowed), `end_seq` for GAP_FILL consistent, all messages carry the same or increasing `session_epoch`.
 
 ## 11. Checklist
 
-- [ ] migration `0002_leader_lock` + `PgLeaderLock`, `PgSessionFence`, `PgCheckpoint.load`
-- [ ] `messages.py` + tests
-- [ ] `domain/sequencer.py`, `domain/liveness.py`, `domain/actions.py` + tests
-- [ ] `adapters/bosp_client.py`, `adapters/redpanda_producer.py`
-- [ ] `app.py`, `main.py` (replace stub), readiness, metrics
-- [ ] `tests/unit/reader/fakes.py` + `test_app.py`
-- [ ] integration tests green with compose up
+- [x] migration `0002_leader_lock` + `PgLeaderLock`, `PgSessionFence`, `PgCheckpoint.load`
+- [x] `messages.py` + tests
+- [x] `domain/sequencer.py`, `domain/liveness.py`, `domain/actions.py` + tests
+- [x] `adapters/bosp_client.py`, `adapters/redpanda_producer.py`
+- [x] `app.py`, `main.py` (replace stub), readiness, metrics
+- [x] `tests/unit/reader/fakes.py` + `test_app.py`
+- [x] integration tests green with compose up
 - [ ] manual fault check: `kill -9` leader → failover < 15 s; `SIGSTOP` 45 s → superseded, resumes standby; `docker compose stop postgres` 5 s → same leader afterwards
-- [ ] go-back-N waste measured and recorded under D13
-- [ ] **cut line:** sequencer unit tests + one e2e run mandatory; the rest optional if the 75 min run out
-- [ ] `docs/DECISIONS.md`: append D12, D13, D15, D16 (D14, D17, D19, D20 already recorded 2026-11-04)
+- [x] go-back-N waste measured and recorded under D13
+- [x] **cut line:** sequencer unit tests + one e2e run mandatory; the rest optional if the 75 min run out
+- [x] `docs/DECISIONS.md`: append D12, D13, D15, D16 (D14, D17, D19, D20 already recorded 2026-11-04)
 - [ ] commit on `feature/step-2-session-reader`; tick Step 2 in `PLAN.md`
+
+## Execution notes
+
+- **Tests.** 84 unit (sequencer 30, liveness 5, messages 8, app 13, the rest from Step 1), 13 integration (bosp client 5, pg lock/fence/checkpoint 5, migrations 3). All green.
+- **E2E.** `ReaderApp` with its own `client_id` and topic against the chaos gateway and real Redpanda: 383,490 messages over 200 channels in 45 s (8,477 msg/s), no holes in any channel, 1 session.
+- **Faults.** `kill -9` leader → lease handed over in 8.7 s (budget 15 s), new session up. Postgres restart → leader logged "lock store unavailable; keeping session" and kept the session (D20). SIGSTOP: see `scripts/faults.sh` output in PLAN.md.
+- **Methodology lesson.** `docker kill` counts as a manual stop and defeats `restart: unless-stopped`, so the killed replica never came back as a standby. Faults must target the host PID (`kill -9 $(docker inspect -f '{{.State.Pid}}' …)`) so the container restarts.
 
 ## 12. Deferred
 

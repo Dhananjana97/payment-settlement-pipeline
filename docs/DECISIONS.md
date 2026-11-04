@@ -229,6 +229,77 @@ Rules, derived from `bank.py`:
 
 ---
 
+## D12. Leader lock: a Postgres lease row, not Redis
+
+**Decision.** `leader_lock(name PK, holder, expires_at)`. Acquire is one statement, `INSERT … ON CONFLICT (name) DO UPDATE SET holder, expires_at WHERE leader_lock.expires_at < now() OR leader_lock.holder = EXCLUDED.holder`; renew is `UPDATE … WHERE holder = :h AND expires_at > now()`; both use the database clock on both sides so reader clock skew cannot matter. TTL 10 s, renew every 3 s, standby polls every 1 s. Liveness only; the correctness guard stays the gateway epoch (D2).
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| Redis `SET NX PX` (incumbent `leader.py`) | Wiped mid-run (fault #5); the incumbent renews with `pexpire` without checking ownership, so a paused leader extends someone else's lock. |
+| Postgres advisory lock on a dedicated connection | Released only when the server notices the TCP connection is dead; after `kill -9` that waits on keepalive timers, not on our TTL. |
+| Postgres lease row with compare-and-set | One durable truth all readers see; expiry is a timestamp the DB evaluates; ownership checked on every renew. |
+
+**Why.** Every reader already needs Postgres for the checkpoint and the fence, so the lease costs no extra dependency and survives the Redis wipe. Measured: `kill -9` of the leader → lease handed over in 8.7 s, well inside the 15 s failover budget.
+
+**Cost accepted.** One small write every 3 s against Postgres; a Postgres outage longer than the TTL can trigger a failover (D20).
+
+---
+
+## D13. Go-back-N without buffering
+
+**Decision.** On a gap the sequencer sends one `RESEND from expected`, drops every frame with `seq > expected` until `expected` arrives, re-requests after 2 s with no progress, and after 30 attempts marks the session fatal (reconnect resumes from the checkpoint).
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| Buffer ahead-of-gap frames and splice when the gap closes | Memory unbounded on a hot channel during a lost resend; a second state machine (buffer, eviction, replay ordering) to get right. |
+| Drop and let the server rewind | Matches `RESEND` semantics exactly (`gateway.py:330` rewinds the cursor and re-sends everything from `from_seq`); bounded memory; one table of rules. |
+
+**Why.** The server already re-sends everything after the gap, so buffering only saves bandwidth, never correctness. Measured in one full-speed session on the real gateway with chaos on: delivered 84,921, dropped_ahead 20,893 → **24.6 %** re-sent, under the 50 % rule set at plan review, so no buffering in Step 8. The same session saw 396 duplicate drops, 154 gaps and 52 timed-out resends: lost resends are real, and the timer is needed.
+
+**Cost accepted.** About a quarter of received frames are re-sends at full speed with default chaos; at the brief's 1,000–3,000 frames/s this is bandwidth, not a bottleneck.
+
+---
+
+## D15. A publish failure is session-fatal
+
+**Decision.** A delivery error from the broker (callback with an error) calls `Sequencer.on_publish_failed`, which marks the session fatal. The app exits the session with reason `publish_failed`, flushes and discards the producer, creates a new one (D19), and reconnects from the checkpoint (D14 amended).
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| Retry the one failed message in place | An idempotent librdkafka producer may already be in a fatal state; retrying out of band breaks per-partition ordering guarantees. |
+| Log and continue | `expected` runs ahead of what the broker holds; the frame is lost until a later reconnect happens to resume below it. |
+| Session-fatal, resume from checkpoint | `expected` can never exceed what is durably in the broker; the reconnect re-sends the window and consumers dedupe. |
+
+**Why.** Correctness over availability: a few seconds of reconnect is cheaper than a frame the consumer never sees.
+
+**Cost accepted.** A transient broker error costs one session (≥ 1 s backoff, new epoch). Expected to be rare with `acks=all` and 30 s message timeout.
+
+---
+
+## D16. One message contract between reader and consumer
+
+**Decision.** `services/common/messages.py::LedgerMessage` with fields `channel, seq, end_seq, kind, event, session_epoch, published_at, v=1`, JSON-encoded, key = `channel`. Invariants are enforced in `__post_init__` (`end_seq == seq` unless `GAP_FILL`; `DATA` iff `event` present; known `kind`). The consumer advances `channel_progress.last_seq` to `end_seq` iff `last_seq == seq − 1`.
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| Publish the raw gateway frame | No `session_epoch` for fencing; no `end_seq`, so a `GAP_FILL` range needs re-deriving on the consumer. |
+| Protobuf / Avro with a schema registry | Registry, codegen and compatibility rules for six fields; more to explain in the debrief than it saves. |
+| Versioned JSON dataclass | One codec, tested once, used by both sides; `v` allows a later change without a flag day. |
+
+**Why.** The reader and consumer are the two halves of one ordering guarantee; a shared, validated type is the cheapest way to keep them agreeing.
+
+**Cost accepted.** JSON is larger than a binary encoding; `compression.type=lz4` on the producer covers most of it.
+
+---
+
 ## D14 (amended). Resume point = `channel_progress` on **every** reconnect
 
 **Decision.** On every logon, including reconnects by the same leader, the reader resumes from `channel_progress` (consumer-applied, Postgres). The in-memory acked map is kept only for credit accounting (D10), never for resume. Supersedes the first draft of D14 in `docs/STEP2-PLAN.md`.
@@ -291,4 +362,5 @@ Rules, derived from `bank.py`:
 | 2026-11-04 | D6 adjusted: bank limit is 20 req/s in `bank.py`, not the 50 in the brief. |
 | 2026-11-04 | D11 added: SQLAlchemy 2.0 + Alembic; ORM for workflows, Core for the consumer apply / executor claim hot paths. |
 | 2026-11-04 | Review validated against `gateway.py`/librdkafka; three notes added: D14 fallback to acked map when Postgres is unreachable, D18 counter expected zero, D20 post-outage race. |
+| 2026-11-04 | D12, D13, D15, D16 recorded after Step 2 build; D13 waste measured at 24.6 %. |
 | 2026-11-04 | Plan review. D4 amended: one transaction per poll batch, not per event (hot-partition throughput). D14 amended: resume from `channel_progress` on every reconnect. D17 credit floor during resend, D18 consumer skip rule, D19 producer recovery + backoff, D20 lock renew tri-state added. Go-back-N waste (D13) to be measured at `GATEWAY_DROP_RATE=0.01` in Step 2 and recorded before DESIGN.md. |
