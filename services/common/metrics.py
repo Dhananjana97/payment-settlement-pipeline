@@ -44,6 +44,10 @@ bank_request_seconds = Histogram("bank_request_seconds", "bank request latency",
                                  buckets=(0.1, 0.25, 0.5, 1, 1.5, 2, 5, 10, 30))
 limiter_wait_seconds = Histogram("limiter_wait_seconds", "time spent waiting for a rate-limit slot", ["bucket"], registry=REGISTRY)
 limiter_fallback = Gauge("limiter_fallback", "1 when the Redis limiter is unavailable and the local share is in use", registry=REGISTRY)
+bank_duplicate_reference_total = Counter("bank_duplicate_reference_total",
+                                         "searches that found more than one bank payout for one reference (P1)", registry=REGISTRY)
+payouts_stuck_total = Counter("payouts_stuck_total", "payouts moved to stuck (needs a human)", registry=REGISTRY)
+executor_threads_busy = Gauge("executor_threads_busy", "worker threads processing a payout", registry=REGISTRY)
 
 # --- api ----------------------------------------------------------------------------
 api_request_seconds = Histogram("api_request_seconds", "HTTP request latency", ["route", "status"], registry=REGISTRY,

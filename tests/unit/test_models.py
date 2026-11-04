@@ -6,10 +6,11 @@ from services.common.models import PAYOUT_PUBLIC_STATUS, PAYOUT_STATUSES, ALL_TA
 MONEY_SUFFIX = "_minor"
 
 
-def test_twelve_tables():
+def test_thirteen_tables():
     assert sorted(t.name for t in ALL_TABLES) == sorted([
         "merchants", "auths", "captures", "processed_events", "channel_progress", "ledger_history",
         "platform_fees", "payouts", "payout_attempts", "session_lease", "bank_token", "leader_lock",
+        "executor_heartbeat",
     ])
 
 
@@ -74,3 +75,17 @@ def test_payouts_claim_index():
 
 def test_metadata_is_single_base():
     assert all(t.metadata is Base.metadata for t in ALL_TABLES)
+
+
+def test_stuck_status_is_stored_but_public_pending():
+    assert "stuck" in PAYOUT_STATUSES
+    assert PAYOUT_PUBLIC_STATUS["stuck"] == "pending"
+    sql = str([c for c in models.Payout.__table__.constraints if isinstance(c, CheckConstraint)][0].sqltext)
+    assert "'stuck'" in sql
+
+
+def test_payouts_claimable_partial_index():
+    idx = {i.name: i for i in models.Payout.__table__.indexes}["ix_payouts_claimable"]
+    assert [c.name for c in idx.columns] == ["next_attempt_at"]
+    where = str(idx.dialect_options["postgresql"]["where"])
+    assert "'stuck'" not in where and "'accepted'" in where and "'ambiguous'" in where

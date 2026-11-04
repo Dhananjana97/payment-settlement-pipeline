@@ -35,6 +35,13 @@ x-service: &service
     start_period: 10s
 
 services:
+  # Harness bank: pass through two failure-rate knobs the harness compose file doesn't forward
+  # (bank.py:56-57). Reviewers raise BANK_P_FAIL_AFTER_COMMIT to 0.10 (§5.4 #9). Defaults = bank.py's.
+  bank:
+    environment:
+      BANK_P_FAIL_AFTER_COMMIT: "${BANK_P_FAIL_AFTER_COMMIT:-0.03}"
+      BANK_P_HANG_AFTER_COMMIT: "${BANK_P_HANG_AFTER_COMMIT:-0.02}"
+
   postgres:
     image: postgres:16
     environment:

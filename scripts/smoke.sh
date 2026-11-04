@@ -18,7 +18,7 @@ n=$(docker compose exec -T redpanda rpk topic describe ledger-events --brokers r
 [ "$n" = "12" ] && pass "topic ledger-events has 12 partitions" || fail "topic partitions: $n"
 
 t=$(docker compose exec -T postgres psql -U ledger -d ledger -tAc "select count(*) from pg_tables where schemaname='public' and tablename<>'alembic_version'")
-[ "$t" = "12" ] && pass "schema has 12 tables" || fail "tables: $t"
+[ "$t" = "13" ] && pass "schema has 13 tables" || fail "tables: $t"
 
 curl -fsS $API/healthz >/dev/null && pass "api /healthz" || fail "api /healthz"
 curl -fsS $API/readyz  >/dev/null && pass "api /readyz"  || fail "api /readyz"
