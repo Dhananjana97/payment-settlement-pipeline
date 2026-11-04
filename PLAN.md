@@ -90,19 +90,20 @@ Decisions to write down (they feed DESIGN.md directly):
 - [x] Read API endpoints implemented for real (6 routes) over a `ReadStore` port.
 - [x] Tests: 26 unit + 6 integration green; `scripts/smoke.sh` PASS with 16 healthy containers.
 
-### Step 2 — Session reader (1:15–2:00) — 🔧 built, verifying faults (`docs/STEP2-PLAN.md`)
+### Step 2 — Session reader (1:15–2:00) — ✅ DONE 2026-11-04 (`docs/STEP2-PLAN.md`, PR #3)
 - [x] BOSP framing: uint32 BE length prefix, partial reads, discard partial frame on disconnect.
 - [x] LOGON with `resume` from `channel_progress`; handle `LOGON_REJECT` (`throttled` → wait `retry_after_ms`).
 - [x] Heartbeats every `heartbeat_ms`; answer `TEST_REQUEST` with echoed `test_req_id`; treat 2×hb silence as dead.
 - [x] Per-channel sequencing state machine (pure, unit-testable): expected seq, duplicate drop (regardless of `poss_dup`), gap → `RESEND from_seq`, **resend timeout → re-request** (lost resend), `GAP_FILL` advances to `new_seq`.
 - [x] Credit: initial grant per channel; re-grant as frames are durably published; never exceed 10,000 outstanding; **credit floor of 64 while a resend is pending** (D17).
-- [ ] Leader election (Postgres lease, liveness only; D12) + **fencing by `session_epoch`** persisted in Postgres; standby takes over within 15 s on leader death; superseded/old-epoch leader must stop publishing.
+- [x] Leader election (Postgres lease, liveness only; D12) + **fencing by `session_epoch`** persisted in Postgres; standby takes over within 15 s on leader death; superseded/old-epoch leader must stop publishing.
 - [x] Publish to broker keyed by `merchant_id` with `session_epoch`, `seq`, `event` in payload; `NOTICE`/`GAP_FILL` published as progress markers (they advance `last_seq`).
 - [x] Resume from `channel_progress` on **every** reconnect (D14 amended); warn when `acked − checkpoint` > 20,000 on a channel.
 - [x] Delivery error → session fatal → **recreate the producer**; reconnect backoff 1 s → 15 s cap, reset after a 30 s healthy session (D19).
 - [x] Lock renew tri-state: `LOST` → step down now; `UNAVAILABLE` → keep the session until the lease TTL since the last good renew elapses (D20).
 - [x] Measure go-back-N waste: run the e2e test with `GATEWAY_DROP_RATE=0.01`, record dropped-ahead ÷ delivered under D13 in `docs/STEP2-PLAN.md`; if > 50 % on hot channels, buffer ahead-of-gap frames in Step 8.
 - [x] Metrics: session holder + epoch, gaps, resends, per-channel lag, reconnects.
+- [x] **Fault checks (`scripts/faults.sh all` → PASS):** `kill -9` leader → lease handover 8.5 s, new session up 8.6 s, container restarted · `SIGSTOP` 45 s → standby took over at 9.0 s, old leader stepped down (`lock_lost`) 0.2 s after waking, no reconnect · Postgres restart → same leader (D20). Two bugs found by the real faults and fixed: reused `hostname:pid` identity inherited its own stale lease (incumbent L4 in our code); reconnect raced the lease check on wake.
 - [x] **Tests:** unit — `domain/sequencer.py` every branch (gap, lost resend, `GAP_FILL`, dup with either `poss_dup`, reconnect/resume, credit accounting, **credit floor at the unacked cap with an open gap**); app — reader with `FakeGateway` + `InMemoryPublisher` + `FakeClock` (failover, superseded, heartbeat timing, **delivery error → new producer + resume from checkpoint**, **renew UNAVAILABLE keeps the session, LOST drops it**); integration — `BospClient` against the real `gateway.py` with chaos on, `RedpandaProducer` ack ordering, **Postgres stopped 5 s mid-session → same holder afterwards**. **Done:** 84 unit (sequencer 30, liveness 5, messages 8, app 13), 13 integration (bosp client 5, pg lock/fence/checkpoint 5, migrations 3); e2e 383,490 msgs / 200 channels / 45 s (8,477/s), no holes.
 - [x] **Cut line (75 min):** sequencer unit tests + one e2e run are mandatory; remaining app/integration tests are optional if time is short.
 
