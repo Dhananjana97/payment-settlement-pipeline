@@ -1,15 +1,8 @@
-# Python
-__pycache__/
-*.py[cod]
 .venv/
-venv/
+__pycache__/
+*.pyc
+.pytest_cache/
 *.egg-info/
-
-# Env / secrets
-.env
-.env.*
-
-# Editors / OS
+.env.local
+docker-compose.override.yml
 .idea/
-.vscode/
-.DS_Store

@@ -1,0 +1,167 @@
+# Settlement Stream — everything, including the harness.
+#
+#   docker compose up -d --build --wait          # bring up all services
+#   docker compose up -d --scale consumer=6      # scale any of ours
+#   docker compose ps -q reader                  # container ids (used by scripts/faults.sh)
+#
+# Tunables live in .env (harness knobs + replica counts).
+# Host ports default to the assignment's (5432, 6379, 19092, 8080). If they clash on your machine,
+# set PG_HOST_PORT / REDIS_HOST_PORT / REDPANDA_HOST_PORT / API_HOST_PORT in a git-ignored
+# docker-compose.override.yml or in the shell; the containers themselves are unaffected.
+
+include:
+  - harness/docker-compose.harness.yml
+
+x-service: &service
+  build:
+    context: .
+    dockerfile: services/Dockerfile
+  env_file: .env
+  restart: unless-stopped
+  stop_grace_period: 5s
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redpanda-init:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:9100/healthz', timeout=2).status==200 else 1)"]
+    interval: 5s
+    timeout: 3s
+    retries: 6
+    start_period: 10s
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ledger
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - synchronous_commit=on
+      - -c
+      - wal_compression=on
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${PG_HOST_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    # Deliberately non-durable: reviewers restart Redis without persistence (fault #5).
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  redpanda:
+    image: redpandadata/redpanda:v24.2.11
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=2
+      - --memory=2G
+      - --overprovisioned
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "${REDPANDA_HOST_PORT:-19092}:19092"
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+
+  redpanda-init:
+    image: redpandadata/redpanda:v24.2.11
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        rpk topic create ${KAFKA_TOPIC:-ledger-events} -p ${KAFKA_PARTITIONS:-12} -r 1 --brokers redpanda:9092 || rpk topic describe ${KAFKA_TOPIC:-ledger-events} --brokers redpanda:9092
+    restart: "no"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+    env_file: .env
+    command: ["python", "-m", "services.migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  reader:
+    <<: *service
+    command: ["python", "-m", "services.reader.main"]
+    environment:
+      SERVICE_NAME: reader
+    deploy:
+      replicas: ${READER_REPLICAS:-2}
+
+  consumer:
+    <<: *service
+    command: ["python", "-m", "services.consumer.main"]
+    environment:
+      SERVICE_NAME: consumer
+    deploy:
+      replicas: ${CONSUMER_REPLICAS:-4}
+
+  executor:
+    <<: *service
+    command: ["python", "-m", "services.executor.main"]
+    environment:
+      SERVICE_NAME: executor
+    deploy:
+      replicas: ${EXECUTOR_REPLICAS:-2}
+
+  api:
+    build:
+      context: .
+      dockerfile: services/Dockerfile
+    env_file: .env
+    command: ["python", "-m", "services.api.main"]
+    environment:
+      SERVICE_NAME: api
+    restart: unless-stopped
+    stop_grace_period: 5s
+    ports:
+      - "${API_HOST_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/readyz', timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  pgdata:
+  redpanda:

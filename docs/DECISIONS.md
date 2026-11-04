@@ -202,9 +202,35 @@ Rules, derived from `bank.py`:
 
 ---
 
+## D11. Data access: SQLAlchemy 2.0 + Alembic, ORM for workflows, Core for the hot path
+
+**Decision.** SQLAlchemy 2.0 with the `psycopg` 3 driver (sync engine in reader/consumer/executor, async engine in the API). Alembic owns the schema: models in `services/common/models.py`, migrations generated from them and reviewed by hand. Rule: ORM `Session` for row-at-a-time workflows (payout state transitions, token store, session lease, read API, tests); Core statements on a plain connection for the consumer's apply transaction and the executor's `claim()`.
+
+**Options.**
+
+| Option | Async | Raw-SQL escape hatch | Migrations | Problem |
+|---|---|---|---|---|
+| Raw psycopg 3 + `schema.sql` | Yes | n/a | hand-written | Fast and simple, but every table change is hand-edited SQL in several places; no model layer for tests or the debrief change |
+| SQLAlchemy 2.0 | Yes | Core + `text()` beside the ORM | Alembic | — |
+| SQLModel | Yes (wraps SQLAlchemy) | Same | Alembic | Thin layer that lags SQLAlchemy and hides what runs; harder to explain live |
+| Django ORM | Partial | `raw()` | built-in | Pulls all of Django into four non-web services |
+| Tortoise ORM | async-only | limited | Aerich | No sync mode for consumer/executor processes; small ecosystem |
+| Peewee | No | Yes | separate tool | No async for the API |
+
+**Why SQLAlchemy.**
+1. One model definition drives DDL, Core statements and ORM queries, so the schema has a single source of truth.
+2. Core gives typed, composable SQL for the statements that matter for correctness (`INSERT … ON CONFLICT DO NOTHING` with rowcount check, `UPDATE … WHERE last_seq = :seq - 1`, `SELECT … FOR UPDATE SKIP LOCKED`) without the ORM's identity map and autoflush on the 3,000 events/s path.
+3. Alembic makes the debrief's "add a per-merchant daily limit" a migration file plus one rule, not a schema rewrite.
+4. It is the ORM reviewers are most likely to know, so it costs nothing to explain.
+
+**Cost accepted.** Heavier dependency than raw psycopg; some care needed to keep the hot path on Core. Both ORM sessions and `FOR UPDATE SKIP LOCKED` need session-level connection state, which is one more reason not to put PgBouncer in transaction mode in front of it (the incumbent's P7/C13).
+
+---
+
 ## Changes log
 
 | Date | Change |
 |---|---|
 | 2026-11-04 | D5 adjusted after reading `bank.py`: same-key retry first, search only when the key may have expired. |
 | 2026-11-04 | D6 adjusted: bank limit is 20 req/s in `bank.py`, not the 50 in the brief. |
+| 2026-11-04 | D11 added: SQLAlchemy 2.0 + Alembic; ORM for workflows, Core for the consumer apply / executor claim hot paths. |
