@@ -90,27 +90,34 @@ Decisions to write down (they feed DESIGN.md directly):
 - [x] Read API endpoints implemented for real (6 routes) over a `ReadStore` port.
 - [x] Tests: 26 unit + 6 integration green; `scripts/smoke.sh` PASS with 16 healthy containers.
 
-### Step 2 — Session reader (1:15–2:00)
+### Step 2 — Session reader (1:15–2:00) — 📝 planned: `docs/STEP2-PLAN.md`
 - [ ] BOSP framing: uint32 BE length prefix, partial reads, discard partial frame on disconnect.
 - [ ] LOGON with `resume` from `channel_progress`; handle `LOGON_REJECT` (`throttled` → wait `retry_after_ms`).
 - [ ] Heartbeats every `heartbeat_ms`; answer `TEST_REQUEST` with echoed `test_req_id`; treat 2×hb silence as dead.
 - [ ] Per-channel sequencing state machine (pure, unit-testable): expected seq, duplicate drop (regardless of `poss_dup`), gap → `RESEND from_seq`, **resend timeout → re-request** (lost resend), `GAP_FILL` advances to `new_seq`.
-- [ ] Credit: initial grant per channel; re-grant as frames are durably published; never exceed 10,000 outstanding.
-- [ ] Leader election (Redis lock with TTL for liveness only) + **fencing by `session_epoch`** persisted in Postgres; standby takes over within 15 s on leader death; superseded/old-epoch leader must stop publishing.
+- [ ] Credit: initial grant per channel; re-grant as frames are durably published; never exceed 10,000 outstanding; **credit floor of 64 while a resend is pending** (D17).
+- [ ] Leader election (Postgres lease, liveness only; D12) + **fencing by `session_epoch`** persisted in Postgres; standby takes over within 15 s on leader death; superseded/old-epoch leader must stop publishing.
 - [ ] Publish to broker keyed by `merchant_id` with `session_epoch`, `seq`, `event` in payload; `NOTICE`/`GAP_FILL` published as progress markers (they advance `last_seq`).
+- [ ] Resume from `channel_progress` on **every** reconnect (D14 amended); warn when `acked − checkpoint` > 20,000 on a channel.
+- [ ] Delivery error → session fatal → **recreate the producer**; reconnect backoff 1 s → 15 s cap, reset after a 30 s healthy session (D19).
+- [ ] Lock renew tri-state: `LOST` → step down now; `UNAVAILABLE` → keep the session until the lease TTL since the last good renew elapses (D20).
+- [ ] Measure go-back-N waste: run the e2e test with `GATEWAY_DROP_RATE=0.01`, record dropped-ahead ÷ delivered under D13 in `docs/STEP2-PLAN.md`; if > 50 % on hot channels, buffer ahead-of-gap frames in Step 8.
 - [ ] Metrics: session holder + epoch, gaps, resends, per-channel lag, reconnects.
-- [ ] **Tests:** unit — `domain/sequencer.py` every branch (gap, lost resend, `GAP_FILL`, dup with either `poss_dup`, reconnect/resume, credit accounting); app — reader with `FakeGateway` + `InMemoryPublisher` + `FakeClock` (failover, superseded, heartbeat timing); integration — `BospClient` against the real `gateway.py` with chaos on, `RedpandaProducer` ack ordering.
+- [ ] **Tests:** unit — `domain/sequencer.py` every branch (gap, lost resend, `GAP_FILL`, dup with either `poss_dup`, reconnect/resume, credit accounting, **credit floor at the unacked cap with an open gap**); app — reader with `FakeGateway` + `InMemoryPublisher` + `FakeClock` (failover, superseded, heartbeat timing, **delivery error → new producer + resume from checkpoint**, **renew UNAVAILABLE keeps the session, LOST drops it**); integration — `BospClient` against the real `gateway.py` with chaos on, `RedpandaProducer` ack ordering, **Postgres stopped 5 s mid-session → same holder afterwards**.
+- [ ] **Cut line (75 min):** sequencer unit tests + one e2e run are mandatory; remaining app/integration tests are optional if time is short.
 
 ### Step 3 — Ledger consumers (2:00–2:30)
-- [ ] Consume from broker in partition order; batch per partition.
-- [ ] Per event, one transaction: `INSERT processed_events ON CONFLICT DO NOTHING` → if inserted, apply §4 rule (AUTH / AUTH_EXPIRY / CAPTURE / REFUND / CHARGEBACK / PAYOUT_REQUEST / MERCHANT_CONFIG / unknown=ignore), write `ledger_history` row, update `channel_progress.last_seq` (contiguity enforced), insert `payouts` row if accepted. Commit → then commit broker offset (at-least-once + idempotent = effectively-once).
+- [ ] Consume from broker in partition order; **one transaction per poll batch per partition** (≤ 200 records or 50 ms; D4 amended), `consumer_batch_size` histogram.
+- [ ] Per event inside the batch: `INSERT processed_events ON CONFLICT DO NOTHING` → if inserted, apply §4 rule (AUTH / AUTH_EXPIRY / CAPTURE / REFUND / CHARGEBACK / PAYOUT_REQUEST / MERCHANT_CONFIG / unknown=ignore), write `ledger_history` row, update `channel_progress.last_seq` (contiguity enforced), insert `payouts` row if accepted. Commit the batch → then commit broker offset (at-least-once + idempotent = effectively-once).
+- [ ] Out-of-order seq → **skip, commit, count** `consumer_out_of_order_total{channel}`; never park (D18; safe because of D14 amended).
+- [ ] DB connection errors mid-batch → retry the batch with backoff, don't exit (D20).
 - [ ] Reject stale epochs (fencing check at the DB hop).
 - [ ] Platform fees sharded (no single hot row).
 - [ ] Survive: consumer `kill -9` mid-batch, broker restart, rebalance/scale-out.
-- [ ] **Tests:** unit — `domain/rules.py` every row of §4 incl. rejections and ignore; **conformance** — run `harness/ledger_events.py` generated channels through `rules.py` and diff against `apply_event()` per merchant; integration — exactly-once apply under concurrent redelivery on real Postgres (A7), contiguity guard rejects out-of-order seq, consumer `kill -9` mid-batch replays cleanly.
+- [ ] **Tests:** unit — `domain/rules.py` every row of §4 incl. rejections and ignore; **conformance** — run `harness/ledger_events.py` generated channels through `rules.py` and diff against `apply_event()` per merchant; integration — exactly-once apply under concurrent redelivery on real Postgres (A7: **same batch delivered to two threads → applied once**), contiguity guard skips out-of-order seq and the skipped seq applies when re-delivered, consumer `kill -9` mid-batch replays cleanly.
 - [ ] **Milestone:** `verify.py check` passes balances + as_of + platform fees with chaos on (payouts may still be pending).
 
-### Step 4 — Read API (2:30–2:45)
+### Step 4 — Read API (2:30–2:45) — endpoints already shipped in Step 1; reclaim this slot for Step 3 batching or Part C
 - [ ] `GET /v1/merchants/{id}/balance` (+ `last_seq`), `?as_of=` (index lookup, p99 < 50 ms), `GET /v1/platform/balances`, `GET /v1/payouts/{id}` (404 until applied).
 - [ ] `/healthz`, `/readyz` (DB + broker reachable), `/metrics`.
 
@@ -132,13 +139,13 @@ Decisions to write down (they feed DESIGN.md directly):
 - [ ] **Tests:** unit — `domain/payout_fsm.py` every row of the `BANK-API.md` table as verified in `bank.py` (A7 outcome matrix), key-age boundary, `account_closed` terminal; app — executor with `FakeBank` + `FakeClock` driving timeout→same-key→replay and maintenance→ambiguous→search→new-key paths, crash-at-every-transition replay; integration — `claim()` with `SKIP LOCKED` under 2 executors, cross-process limiter (A7), `HttpBank` against the real `bank.py` incl. shrunk windows.
 - [ ] **Milestone:** `verify.py check` → `RESULT: PASS` with default bank chaos, then with shrunk windows (`BANK_IDEMPOTENCY_TTL_S=20 BANK_OUTAGE_FIRST_S=30 BANK_OUTAGE_LEN_S=30 BANK_OUTAGE_EVERY_S=90`).
 
-### Step 6 — Part C: REVIEW.md + reproducers (3:45–4:45)
-- [ ] Walk each incumbent file; list every defect with `file:line`, trigger, impact, fix. Rank by severity. Target > 20 (they know > 20).
-- [ ] Root-cause the three symptoms with named defects + sequence of events:
+### Step 6 — Part C: REVIEW.md + reproducers (3:45–4:45) — ✅ DONE 2026-11-04 (`docs/STEP6-PLAN.md`, branch `feature/step-6-review`)
+- [x] Walk each incumbent file; list every defect with `file:line`, trigger, impact, fix. Rank by severity. Target > 20 (they know > 20).
+- [x] Root-cause the three symptoms with named defects + sequence of events:
   - 14 double payouts (hint: idempotency key vs 120 s TTL + 15-min maintenance window; ambiguous responses retried; two readers "session up" same minute → duplicate accepted payouts).
   - 3 busy-merchant balance drift (hint: 16 threads breaking per-merchant order; Redis checkpoint lost on restart; offset commit before DB commit; REPEATABLE READ overdraft).
   - 9 accepted-but-never-sent payouts (hint: outbox row claimed then crashed with no lease expiry; executor "stopped for 40 min" = stuck token/limiter; PgBouncer transaction pooling + session-level state).
-- [ ] Executable reproducers for top 5 in `tests/incumbent/`: each fails against extracted incumbent logic and passes against the fix.
+- [x] Executable reproducers for top 5 in `tests/incumbent/`: each fails against extracted incumbent logic and passes against the fix. 45 defects in `REVIEW.md`; 5 + 3 bonus reproducers (strict xfail vs incumbent, pass vs fix); P4 also on real Postgres.
 
 ### Step 7 — Part B: DESIGN.md (4:45–5:30)
 Answer all 9 questions with numbers against §2 (60k merchants, 4k–30k ev/s, 3B rows, 50 req/s bank, 1.5M month-end payouts):

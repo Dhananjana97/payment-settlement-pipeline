@@ -6,3 +6,4 @@ __pycache__/
 .env.local
 docker-compose.override.yml
 .idea/
+.claude/worktrees/

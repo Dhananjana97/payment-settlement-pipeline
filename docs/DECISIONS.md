@@ -66,12 +66,14 @@ Sources: `ASSIGNMENT.md`, `harness/PROTOCOL.md`, `harness/BANK-API.md`, `harness
 
 ## D4. Exactly-once ledger apply: dedupe row in the same transaction
 
-**Decision.** One Postgres transaction per event:
-1. `INSERT INTO processed_events(event_id) ON CONFLICT DO NOTHING` — if 0 rows, skip.
+**Decision (amended 2026-11-04, was one transaction per event).** One Postgres transaction per **poll batch per partition** (≤ 200 records or 50 ms, whichever first). Inside it, per event, in partition order:
+1. `INSERT INTO processed_events(event_id) ON CONFLICT DO NOTHING` — if 0 rows, skip this event.
 2. Apply the §4 rule to `merchants` / `auths` / `captures`.
 3. Insert the `ledger_history` row (balance after this event).
-4. `UPDATE channel_progress SET last_seq = seq WHERE channel = … AND last_seq = seq − 1`.
-5. Commit. Then commit the broker offset.
+4. `UPDATE channel_progress SET last_seq = end_seq WHERE channel = … AND last_seq = seq − 1`; if 0 rows → outcome `out_of_order` or `duplicate`, event skipped (see D18).
+5. After the last event: commit once. Then commit the partition offset to `last.offset + 1`.
+
+**Why batch.** Commits are fsync-bound (~1–2 ms with `synchronous_commit=on`), so one transaction per event caps a partition at ~500–1,000 ev/s. The Zipf top channel (`gateway.py:88`) carries ~15 % of all frames, i.e. ~450 ev/s steady and ~1,800 ev/s in 4× bursts on a single partition. Batching keeps `synchronous_commit=on` (no durability trade) and takes the per-partition ceiling to tens of thousands of rows/s. A crash replays the whole batch; every event hits `processed_events` and skips. Batch size is a setting and a histogram (`consumer_batch_size`) so DESIGN.md §3/§5 can quote it.
 
 **Options.**
 
@@ -227,6 +229,60 @@ Rules, derived from `bank.py`:
 
 ---
 
+## D14 (amended). Resume point = `channel_progress` on **every** reconnect
+
+**Decision.** On every logon, including reconnects by the same leader, the reader resumes from `channel_progress` (consumer-applied, Postgres). The in-memory acked map is kept only for credit accounting (D10), never for resume. Supersedes the first draft of D14 in `docs/STEP2-PLAN.md`.
+
+**Options.**
+
+| Option | Self-heals a consumer skip? | Cost per reconnect |
+|---|---|---|
+| Resume from in-memory acked seq (first draft) | No: a message the consumer skipped is never re-requested until a *fresh* leader reads the checkpoint | Zero re-sends |
+| Resume from `channel_progress` always | Yes: anything not yet applied is re-sent and deduped | Re-sends the consumer backlog (acked − applied) |
+
+**Why.** The gateway disconnects every 60–180 s anyway (`gateway.py:175`), so every gap between "published" and "applied" is re-sent within minutes with no extra mechanism. **Fallback:** if `channel_progress` cannot be loaded at reconnect time (Postgres restarting, fault #6) the reader resumes from its in-memory acked map and logs a warning, rather than stalling; the next successful reconnect heals from the checkpoint. This is what makes the consumer's skip rule (D18) safe. Bound the cost: if `acked − checkpoint` exceeds `RESUME_BACKLOG_WARN` (default 20,000) for a channel, log a warning with the size; that number feeds DESIGN.md §3.
+
+---
+
+## D17. Credit floor while a resend is pending
+
+**Decision.** In `Sequencer.tick`, if a channel has a `resend` outstanding and `granted − received == 0`, emit `GrantCredit(channel, 64)` regardless of the unacked caps (D10). The 10,000 hard cap still applies.
+
+**Why.** Ahead-of-gap frames are dropped by us but still consume credit (`gateway.py:264`). A channel at its unacked cap with an open gap would otherwise never receive the resend: the timer fires `resend_max_attempts` times and the session dies for nothing. 64 is the gateway's per-channel batch size (`gateway.py:244`), exactly enough to deliver the missing frame.
+
+---
+
+## D18. Consumer out-of-order rule: skip, commit, count — never park
+
+**Decision.** A message whose `seq` is neither `last_seq + 1` (contiguous) nor `≤ last_seq` (duplicate) gets outcome `out_of_order`: it is skipped, its offset is committed with the batch, and `consumer_out_of_order_total{channel}` is incremented.
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| Park (don't commit, retry later) | Blocks every merchant sharing the partition; if the missing seq never comes the partition is dead. |
+| Skip and commit | Loses the message locally — safe only if something re-sends it. D14 (amended) guarantees the reader re-requests from the checkpoint on its next reconnect. |
+
+**Why.** With D14 amended, skipping is self-healing and parking is a liveness hazard. A rising counter is an alert, not a stall. Expected value of the counter is **zero**: the reader delivers contiguously per channel and the broker preserves partition order, so any increment means an upstream bug and pages a human. With `GATEWAY_CHAOS=0` (no disconnects) healing waits for the next reconnect; reviewers run chaos on.
+
+---
+
+## D19. Producer recovery and reconnect backoff
+
+**Decision.** A delivery error marks the session fatal (D15). The app then: `flush(2 s)`, discard the producer, create a new `RedpandaProducer` before the next session. Reconnect backoff starts at 1 s (the gateway logon throttle, `gateway.py:373`), doubles to a 15 s cap, resets after a session that lives > 30 s. `message.timeout.ms` stays 30 s so a broker restart shorter than that is invisible.
+
+**Why.** With `enable.idempotence=true`, librdkafka can enter a fatal state after a delivery failure and refuses further produces on that instance; only a new producer recovers. Without backoff the reader would hammer the gateway during a broker outage and hit `throttled` rejects.
+
+---
+
+## D20. Lock renew distinguishes LOST from UNAVAILABLE
+
+**Decision.** `LeaderLock.renew` returns `RENEWED | LOST | UNAVAILABLE`. On `LOST` the leader steps down immediately. On `UNAVAILABLE` (connection error) it keeps the session and retries every 3 s until `lease_ttl` has elapsed since the last successful renew, then steps down. Consumers and executors likewise retry on connection errors with backoff instead of exiting (`pool_pre_ping` already on).
+
+**Why.** Fault #6 restarts Postgres. Treating "can't reach the DB" as "lost the lock" drops the session for the outage plus a full failover, for no safety gain: the correctness guard is the gateway epoch (D2), not the lock. **Known race:** after an outage longer than `lease_ttl`, the standby may acquire before the leader's first renew succeeds; the leader then sees `LOST` and a failover happens anyway. Safe (gateway supersede + epoch), just not free.
+
+---
+
 ## Changes log
 
 | Date | Change |
@@ -234,3 +290,5 @@ Rules, derived from `bank.py`:
 | 2026-11-04 | D5 adjusted after reading `bank.py`: same-key retry first, search only when the key may have expired. |
 | 2026-11-04 | D6 adjusted: bank limit is 20 req/s in `bank.py`, not the 50 in the brief. |
 | 2026-11-04 | D11 added: SQLAlchemy 2.0 + Alembic; ORM for workflows, Core for the consumer apply / executor claim hot paths. |
+| 2026-11-04 | Review validated against `gateway.py`/librdkafka; three notes added: D14 fallback to acked map when Postgres is unreachable, D18 counter expected zero, D20 post-outage race. |
+| 2026-11-04 | Plan review. D4 amended: one transaction per poll batch, not per event (hot-partition throughput). D14 amended: resume from `channel_progress` on every reconnect. D17 credit floor during resend, D18 consumer skip rule, D19 producer recovery + backoff, D20 lock renew tri-state added. Go-back-N waste (D13) to be measured at `GATEWAY_DROP_RATE=0.01` in Step 2 and recorded before DESIGN.md. |
