@@ -50,12 +50,32 @@ Lives behind a new `OpsStore` port (`services/api/ports.py`) with `PgOpsStore`, 
 - Runs against its own schema (`search_path` to a temp schema) so it never touches the live pipeline's rows.
 
 ## 4. Checklist
-- [ ] `/readyz` timeout; D23 in DECISIONS.md
-- [ ] migration 0004: index `processed_events(applied_at)`
-- [ ] `OpsStore` port + `PgOpsStore` + `/v1/ops/status` route
-- [ ] unit: route shape with a fake `OpsStore`; integration: `/v1/ops/status` against seeded rows
-- [ ] `test_as_of_latency.py` green, numbers recorded here
-- [ ] commit on `feature/step-4-api-ops`, tick PLAN.md
+- [x] `/readyz` timeout
+- [x] D23 in DECISIONS.md
+- [x] migration 0004: index `processed_events(applied_at)`
+- [x] `OpsStore` port + `PgOpsStore` + `/v1/ops/status` route
+- [x] unit: route shape with a fake `OpsStore`; integration: `/v1/ops/status` against seeded rows
+- [x] `test_as_of_latency.py` green, numbers recorded here
+- [x] commit on `feature/step-4-api-ops`, tick PLAN.md
+
+## Execution notes
+
+**`as_of` latency at 2 M rows** (`tests/integration/api/test_as_of_latency.py`, marked `integration` + `slow`, isolated schema `latency_<rand>`, dropped afterwards):
+
+| Measurement | Result |
+|---|---|
+| Load | 2,000,000 rows (200 merchants × 10,000 seqs) via `COPY`, index built after load, `ANALYZE`: 15–21 s |
+| Plan (`EXPLAIN ANALYZE` of the exact `PgReadStore.balance_as_of` query) | `Limit -> Index Scan using ix_ledger_history_merchant_time`, no Seq Scan, no Sort; execution 0.05–0.08 ms |
+| HTTP, sequential (how `verify.py` calls it, `verify.py:229-236`), 500 requests | p50 3.7–4.7 ms, p95 5.6–8.2 ms, **p99 6.2–9.3 ms**, max ≤ 11 ms |
+| HTTP, concurrency 20, 1,000 requests, 1 worker | 263–326 req/s; p50 44–57 ms, p95 155–181 ms, p99 220–278 ms |
+| HTTP, concurrency 20, 1,000 requests, 4 workers | 278 req/s; p99 268 ms |
+| Live compose API (≈ 475 k history rows), sequential | p50 1.8 ms, p99 3.6 ms |
+
+**Reading the numbers.** The query is sub-millisecond and the sequential HTTP p99 is ~6× under budget, so the A5 requirement holds as the verifier measures it; the test hard-asserts the sequential p99 < 50 ms. The concurrent figure did not improve from 1 to 4 API workers, so the ceiling (~300 req/s) is the single-process Python `httpx` load generator, not the API; it is printed but asserted only with `LATENCY_ASSERT_CONCURRENT=1`. A real concurrent capacity number needs a non-Python load generator (e.g. `wrk`, `hey`); deferred.
+
+**Harness lessons.** The first two attempts served the API inside the test process (same event loop, then a thread): p50 102–134 ms, because the client and server shared the loop/GIL. The test now starts the API as its own `uvicorn` process (as in compose) and routes it to the test schema with `PGOPTIONS=-csearch_path=…`, without changing API code.
+
+Run: `set -a; . ./.env.local; set +a; RUN_INTEGRATION=1 ./.venv/bin/python -m pytest tests/integration/api/test_as_of_latency.py -q -s` (optional `LATENCY_API_WORKERS=4`, `LATENCY_ASSERT_CONCURRENT=1`).
 
 ## 5. Deferred
 - Prometheus/Grafana containers (Step 1 §10).
