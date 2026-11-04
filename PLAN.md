@@ -147,7 +147,7 @@ Decisions to write down (they feed DESIGN.md directly):
   - 9 accepted-but-never-sent payouts (hint: outbox row claimed then crashed with no lease expiry; executor "stopped for 40 min" = stuck token/limiter; PgBouncer transaction pooling + session-level state).
 - [x] Executable reproducers for top 5 in `tests/incumbent/`: each fails against extracted incumbent logic and passes against the fix. 45 defects in `REVIEW.md`; 5 + 3 bonus reproducers (strict xfail vs incumbent, pass vs fix); P4 also on real Postgres.
 
-### Step 7 — Part B: DESIGN.md (4:45–5:30)
+### Step 7 — Part B: DESIGN.md (4:45–5:30) — 📝 planned: `docs/STEP7-PLAN.md`
 Answer all 9 questions with numbers against §2 (60k merchants, 4k–30k ev/s, 3B rows, 50 req/s bank, 1.5M month-end payouts):
 - [ ] 1. Delivery semantics hop by hop (mechanism + when written vs effect).
 - [ ] 2. Fencing walkthrough (SIGSTOP 45 s scenario), fencing token, why TTL lock is insufficient.
