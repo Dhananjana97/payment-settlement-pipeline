@@ -101,6 +101,7 @@ Found and fixed during Step 8:
 - `consumer_partition_lag` was declared but never set → exported every 5 s from high watermark − last committed offset; stale labels removed after a rebalance (S1 showed revoked partitions still reporting).
 - The first S2 run silently used default chaos: the harness compose passes only six `GATEWAY_*` variables. Our `docker-compose.yml` now passes `GATEWAY_DROP_RATE`, `GATEWAY_DUP_RATE`, `GATEWAY_DISCONNECT_MIN_S/_MAX_S` through (harness untouched); verified with `docker compose config` and `env` in the container before rerunning.
 - Part C P4 test defaulted to the live DB → `ledger_test` with the live-DB guard.
+- S1 `kill-executor`: payout `M-0097:7558` reached `paid` 93.7 s after its executor was killed (attempt 1, 0 searches): lease expiry (45 s) plus a bank maintenance window; still executed exactly once.
 - Honest gap: sustained throughput above ~2,860 ev/s not demonstrated (the gateway released ~2,690/s on average); levers documented in README Known issues.
 
 ## 5. If time runs out (§10 priorities)

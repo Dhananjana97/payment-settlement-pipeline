@@ -28,6 +28,7 @@ def main() -> int:
     )
 
     def readiness() -> tuple[bool, dict]:
+        # app.readiness() reads cached state only (never the Kafka client from this thread)
         ok, detail = app.readiness()
         pg = ping(eng)
         detail["postgres"] = pg
