@@ -160,7 +160,7 @@ Answer all 9 questions with numbers against §2 (60k merchants, 4k–30k ev/s, 3
 - [x] 9. Three tradeoffs.
 Keep under ~8 pages; diagrams welcome.
 
-### Step 8 — Tests, faults, docs (5:30–6:00)
+### Step 8 — Tests, faults, docs (5:30–6:00) — 📝 planned: `docs/STEP8-PLAN.md`
 - [ ] Confirm the A7 set is all present from Steps 2/3/5: sequencing state machine (unit), exactly-once apply under concurrent redelivery (real Postgres), payout outcome matrix, cross-process limiter. Add an end-to-end test: compose up with a short gateway run → `verify.py check` PASS.
 - [ ] `scripts/faults.sh`: at least 2 of §5.4 (e.g. `kill -9` reader leader; `SIGSTOP` leader 45 s; `kill -9` consumer mid-batch; restart Redis without persistence; restart broker; restart Postgres; `kill -9` executor in flight).
 - [ ] **`verify.py` is the floor, not the bar.** Reviewers use a different seed, ≥ 2M frames at 3,000/s, harsher chaos and the full §5.4 schedule. Before calling anything done:
