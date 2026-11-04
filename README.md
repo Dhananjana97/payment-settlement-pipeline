@@ -27,7 +27,7 @@ python harness/verify.py check --api http://localhost:8080   # full correctness 
 ```
 
 - **Inspect:** `docker compose ps`, `docker compose logs -f reader consumer executor`. Logs are JSON lines carrying `event_id`, `payout_id`, `session_epoch` and `channel`.
-- **Start time:** 66 s from a cold build cache with our images deleted (base images already pulled; add their download time on a truly new machine). Limit: 10 min (§9).
+- **Start time:** 66 s from a cold build cache with our images deleted, measured before the observability stack was added; the full 15-service bring-up including Prometheus, Loki, Alloy and Grafana took 29 s warm. Base-image downloads are not included (add them on a truly new machine). Limit: 10 min (§9).
 - **Reset between runs:** `docker compose down -v`. The gateway's release clock starts when it starts, so restart the gateway, the bank and the DB together.
 - **Chaos knobs from the shell:** besides the harness's `GATEWAY_*` and `BANK_*` settings in `.env`, our `docker-compose.yml` also forwards `GATEWAY_DROP_RATE`, `GATEWAY_DUP_RATE`, `GATEWAY_DISCONNECT_MIN_S` / `_MAX_S` to the gateway and `BANK_P_FAIL_AFTER_COMMIT`, `BANK_P_HANG_AFTER_COMMIT` to the bank (the harness compose omits them), so §5.4 #8 and #9 can be set, e.g. `GATEWAY_DROP_RATE=0.01 GATEWAY_DISCONNECT_MIN_S=20 GATEWAY_DISCONNECT_MAX_S=40 docker compose up -d`.
 
@@ -46,15 +46,15 @@ python harness/verify.py check --api http://localhost:8080   # full correctness 
 
 Host ports are `${PG_HOST_PORT:-5432}`, `${API_HOST_PORT:-8080}`, `${GRAFANA_HOST_PORT:-3000}`, `${PROMETHEUS_HOST_PORT:-9090}`, `${LOKI_HOST_PORT:-3100}`, etc. If they clash locally, remap them in a **git-ignored** `docker-compose.override.yml`. Reviewers get the standard ports.
 
-**Tunables** all live in `.env`:
+**Tunables** live in `.env`, or are set in the shell for one run (shell values override `.env`):
 
 | Group | Variables |
 |---|---|
-| Harness | `GATEWAY_SEED/MERCHANTS/EVENTS_PER_CHANNEL/RATE/CHAOS`, `BANK_IDEMPOTENCY_TTL_S`, `BANK_OUTAGE_FIRST_S/EVERY_S/LEN_S`. Compose also forwards `BANK_P_FAIL_AFTER_COMMIT` / `BANK_P_HANG_AFTER_COMMIT` to the bank without editing `harness/` |
+| Harness | `GATEWAY_SEED/MERCHANTS/EVENTS_PER_CHANNEL/RATE/CHAOS`, `BANK_IDEMPOTENCY_TTL_S`, `BANK_OUTAGE_FIRST_S/EVERY_S/LEN_S`. Shell only (not in `.env`; defaults equal the harness's): compose forwards `BANK_P_FAIL_AFTER_COMMIT` / `BANK_P_HANG_AFTER_COMMIT` to the bank and `GATEWAY_DROP_RATE` / `GATEWAY_DUP_RATE` / `GATEWAY_DISCONNECT_MIN_S` / `GATEWAY_DISCONNECT_MAX_S` to the gateway, without editing `harness/` |
 | Replicas | `READER_REPLICAS=2`, `CONSUMER_REPLICAS=4`, `EXECUTOR_REPLICAS=2` |
 | Executor | `BANK_PAYOUT_RATE=18`, `BANK_SEARCH_RATE=9`, `BANK_HTTP_TIMEOUT_S=5`, `PAYOUT_KEY_SAFE_AGE_S=10`, `PAYOUT_SEARCH_DELAY_S=10`, `PAYOUT_MAX_ATTEMPTS=5`, `EXECUTOR_THREADS=16`, `EXECUTOR_LEASE_S=45`, `EXECUTOR_MAX_INFLIGHT_PER_ACCOUNT=2`, `TOKEN_*`, `LIMITER_DISTRUST_AFTER_RESET_S`, `EXECUTOR_HEARTBEAT_S` |
 
-Reviewer-style run: `GATEWAY_EVENTS_PER_CHANNEL=10000 GATEWAY_RATE=3000 BANK_IDEMPOTENCY_TTL_S=20 BANK_OUTAGE_FIRST_S=30 BANK_OUTAGE_LEN_S=30 BANK_OUTAGE_EVERY_S=90 BANK_P_FAIL_AFTER_COMMIT=0.10 docker compose up -d --build --wait`.
+Reviewer-style run: `GATEWAY_EVENTS_PER_CHANNEL=10000 GATEWAY_RATE=3000 BANK_IDEMPOTENCY_TTL_S=20 BANK_OUTAGE_FIRST_S=30 BANK_OUTAGE_LEN_S=30 BANK_OUTAGE_EVERY_S=90 BANK_P_FAIL_AFTER_COMMIT=0.10 docker compose up -d --build --wait`. For §5.4 #8 add `GATEWAY_DROP_RATE=0.01 GATEWAY_DISCONNECT_MIN_S=20 GATEWAY_DISCONNECT_MAX_S=40`.
 
 ## 2. Scale each service
 
@@ -78,7 +78,7 @@ Each non-API service serves `/healthz`, `/readyz` (real checks) and `/metrics` o
 | Broker lag per partition | `consumer_partition_lag{partition}` (high watermark − last committed offset, every 5 s, per owning consumer); cross-check with `docker compose exec redpanda rpk group describe ledger --brokers redpanda:9092` |
 | Payouts by state incl. ambiguous | `/v1/ops/status` → `payouts.by_status` (all 8 statuses incl. `ambiguous`, `stuck`); `payouts_by_status{status}` |
 | Bank error classes | `/v1/ops/status` → `bank.attempts_by_status` (last 5 min, `timeout` for no response); `bank_responses_total{klass}`, `bank_request_seconds`, `bank_duplicate_reference_total`, `payouts_stuck_total`, `limiter_fallback` |
-| Consumer outcomes | `consumer_events_total{outcome}` (applied, rejected:*, duplicate, stale_epoch, out_of_order, malformed), `consumer_out_of_order_total` (expected 0) |
+| Consumer outcomes | `consumer_events_total{outcome}` (applied, rejected, ignored, progress, duplicate, stale_epoch, out_of_order, malformed; the reason for each rejection is in `processed_events.outcome`), `consumer_out_of_order_total` (expected 0) |
 
 ### Dashboards and logs
 
@@ -94,7 +94,7 @@ Each non-API service serves `/healthz`, `/readyz` (real checks) and `/metrics` o
 Copy-paste LogQL (Explore → Loki):
 
 ```logql
-{service="executor"} | payout_id="M-0042:1187"                      # one payout's full history (executor logs per payout)
+{service="executor"} | payout_id="M-0042:1187"                      # one payout's full history (use a real id: docker compose exec postgres psql -U ledger -c "select payout_id from payouts where status='paid' limit 1")
 sum by (service) (count_over_time({level="ERROR"}[5m]))             # errors per service
 {service=~"reader|consumer"} | channel="M-0042"                      # one channel: gaps, resends, out-of-order
 {service="reader"} |~ "session up|session down|stepping down|became leader"   # session changes; session_epoch is on each line
@@ -114,11 +114,11 @@ Observability runs locally (Prometheus + Loki + Grafana in compose) because this
 | `kill-leader` | #1 | lease handover, new `session up`, container restarted | 8.5 s handover / 8.6 s session up; 10.8 s under load (milestone 2). Limit 15 s, production 30 s |
 | `pause-leader [45]` | #2 | standby takes over; old leader steps down on wake, doesn't reconnect | takeover 8.1–10.6 s; old leader `stepping down reason=lock_lost` before reconnecting |
 | `kill-consumer` | #3 | restart, partitions reassigned, no errors | restarted in 3.4 s |
-| `scale-consumers N` | #3 | rebalance to N consumers | S1 ran this fault inline (`docker compose up --scale consumer=6`): 4 → 6 mid-run, verify PASS. The subcommand itself: not yet run |
+| `scale-consumers N` | #3 | rebalance to N consumers | S1 (inline `--scale consumer=6`): 4 → 6 mid-run, verify PASS. Subcommand run on the live stack: 6 consumers healthy after the rebalance, no errors |
 | `restart-postgres` | #6 | same reader keeps its session (D20) | same holder before/after |
 | `kill-executor` | #7a | kill the owner of an in-flight payout; that payout ends terminal | `M-0069:1113` paid 4.3 s after the kill, attempt 1 |
 | `kill-executor-in-maintenance [s]` | #7b | kill during a bank maintenance window; all in-flight payouts end terminal | 39 in flight → all terminal, 12 resolved by search |
-| `restart-broker`, `restart-redis` | #4, #5 | readers reconnect, consumers resume; limiter falls back | S1 ran these faults inline (`docker compose restart redpanda` / `redis`): Redpanda back in 2 s, Redis restarted empty, verify PASS. The subcommands themselves: not yet run |
+| `restart-broker`, `restart-redis` | #4, #5 | readers reconnect, consumers resume; limiter falls back | S1 (inline `docker compose restart`): Redpanda back in 2 s, Redis restarted empty, verify PASS. Subcommands run on the live stack: `restart-broker` → Redpanda healthy in 6.8 s, group lag 0 after 7.0 s, 0 reader `publish_failed` exits, 0 ERROR lines; `restart-redis` → restarted with dbsize 0, executors healthy (the stack was idle, so no limiter fallback was exercised; S1 and milestone 2 covered a Redis wipe under load) |
 | `all` | — | the fault commands in sequence, 10 s apart (leaves 6 consumers running) | — |
 
 Gateway chaos (#8) and bank windows (#9) are environment settings forwarded by our compose (§1).

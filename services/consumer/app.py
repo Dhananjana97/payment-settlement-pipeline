@@ -25,6 +25,7 @@ class ConsumerConfig:
     batch_wait_s: float = 0.05
     fence_refresh_s: float = 2.0
     lag_refresh_s: float = 5.0
+    readiness_stale_s: float = 30.0
     retry_min_s: float = 0.2
     retry_max_s: float = 5.0
     group_id: str = "ledger"
@@ -39,6 +40,8 @@ class ConsumerState:
     retries: int = 0
     fence_epoch: int = 0
     lag: dict = field(default_factory=dict)
+    partitions: list = field(default_factory=list)   # cached by the main loop (see readiness)
+    loop_at: float | None = None                     # last main-loop iteration (liveness)
 
 
 class ConsumerApp:
@@ -56,19 +59,24 @@ class ConsumerApp:
         self._stop.set()
 
     def readiness(self) -> tuple[bool, dict]:
-        try:
-            parts = self._stream.assignment()
-        except Exception as e:
-            return False, {"error": repr(e)}
-        detail = {"partitions": parts, "last_batch_at": self.state.last_batch_at, "batches": self.state.batches,
+        """Called from the health-server thread. It must NOT touch the Kafka client: librdkafka
+        handles aren't safe to call while the main thread is inside `consume()` (that hung /readyz).
+        It reads state the main loop caches instead, which also makes it a real liveness check:
+        not ready if the apply loop hasn't iterated within `readiness_stale_s`."""
+        now = self._clock.now()
+        loop_age = None if self.state.loop_at is None else round(now - self.state.loop_at, 3)
+        alive = loop_age is not None and loop_age <= self.cfg.readiness_stale_s
+        detail = {"partitions": list(self.state.partitions), "loop_age_s": loop_age,
+                  "last_batch_at": self.state.last_batch_at, "batches": self.state.batches,
                   "records": self.state.records, "retries": self.state.retries, "last_error": self.state.last_error,
                   "fence_epoch": self.state.fence_epoch, "lag": self.state.lag}
-        return True, detail
+        return alive, detail
 
     # -- main loop ------------------------------------------------------------------------
     def run(self) -> None:
         try:
             while not self._stop.is_set():
+                self.state.loop_at = self._clock.now()
                 self._export_lag()
                 records = self._stream.poll(self.cfg.batch_max, self.cfg.batch_wait_s)
                 if not records:
@@ -114,6 +122,10 @@ class ConsumerApp:
         if now - self._lag_at < self.cfg.lag_refresh_s:
             return
         self._lag_at = now
+        try:
+            self.state.partitions = self._stream.assignment()
+        except Exception as e:
+            self._log.warning("assignment read failed", error=repr(e)[:200])
         lag_fn = getattr(self._stream, "lag", None)
         if lag_fn is None:
             return
