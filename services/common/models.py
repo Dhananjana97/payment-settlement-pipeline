@@ -21,7 +21,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-PAYOUT_STATUSES = ("accepted", "claimed", "in_flight", "ambiguous", "paid", "failed", "rejected")
+PAYOUT_STATUSES = ("accepted", "claimed", "in_flight", "ambiguous", "paid", "failed", "rejected", "stuck")
+PAYOUT_LIVE = ("accepted", "claimed", "in_flight", "ambiguous")   # claimable by executors (stuck is not)
 PAYOUT_TERMINAL = ("paid", "failed", "rejected")
 PAYOUT_PUBLIC_STATUS = {s: ("pending" if s not in PAYOUT_TERMINAL else s) for s in PAYOUT_STATUSES}
 
@@ -111,10 +112,12 @@ class Payout(Base):
     __tablename__ = "payouts"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('accepted','claimed','in_flight','ambiguous','paid','failed','rejected')",
+            "status IN ('accepted','claimed','in_flight','ambiguous','paid','failed','rejected','stuck')",
             name="ck_payouts_status",
         ),
         Index("ix_payouts_status_lease", "status", "lease_until"),
+        Index("ix_payouts_claimable", "next_attempt_at",
+              postgresql_where=text("status IN ('accepted','claimed','in_flight','ambiguous')")),
     )
 
     payout_id: Mapped[str] = mapped_column(String(64), primary_key=True)  # = PAYOUT_REQUEST event_id
@@ -132,6 +135,13 @@ class Payout(Base):
     bank_payout_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Step 5 (STEP5-PLAN §3.1): write-ahead intent and scheduling
+    pending_send_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    key_uncertain: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    search_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
+    retries: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -179,6 +189,14 @@ class BankToken(Base):
     issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     minted_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class ExecutorHeartbeat(Base):
+    """Live executor instances; the limiter's Redis fallback splits the rate by this count (D6 rev.)."""
+    __tablename__ = "executor_heartbeat"
+
+    instance: Mapped[str] = mapped_column(String(128), primary_key=True)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 ALL_TABLES = tuple(Base.metadata.sorted_tables)

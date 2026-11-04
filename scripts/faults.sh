@@ -7,7 +7,9 @@
 #   scripts/faults.sh restart-postgres       # §5.4 #6: fast restart of Postgres
 #   scripts/faults.sh kill-consumer          # §5.4 #3: kill -9 one ledger consumer mid-batch
 #   scripts/faults.sh scale-consumers N      # §5.4 #3: add consumers (rebalance)
-#   scripts/faults.sh all                    # reader faults, then kill-consumer + scale 6, 10 s apart
+#   scripts/faults.sh kill-executor          # §5.4 #7a: kill -9 an executor while a payout is in flight
+#   scripts/faults.sh kill-executor-in-maintenance  # §5.4 #7b: same, during a bank maintenance window
+#   scripts/faults.sh all                    # reader faults, consumer faults, then the executor faults, 10 s apart
 #
 # Signals are delivered to the reader *process*, not the container:
 #   kill -9  -> `docker exec` a one-liner that SIGKILLs the `services.reader.main` process. The
@@ -171,6 +173,89 @@ cmd_kill_consumer() {
   pass "consumer kill -9: restarted, healthy, no errors"
 }
 
+psql_live() { docker compose exec -T postgres psql -U ledger -d ledger -tA -F'|' -c "$1" 2>/dev/null || true; }
+executor_of() {  # lease_owner (hostname:pid:nonce) -> executor container id
+  local host=${1%%:*} id
+  for id in $(docker compose ps -q executor); do
+    if [ "${id:0:12}" = "$host" ]; then echo "$id"; return 0; fi
+  done
+  return 1
+}
+bank_maintenance() { curl -fsS localhost:7200/healthz 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('maintenance'))" 2>/dev/null || echo "?"; }
+wait_terminal() {  # $1 = comma-separated quoted payout ids, $2 = max seconds; returns 1 on timeout
+  local i left
+  for i in $(seq 1 "$2"); do
+    left=$(psql_live "select count(*) from payouts where payout_id in ($1) and status not in ('paid','failed','rejected')")
+    [ "${left:-1}" = "0" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+kill_executor_container() {  # $1 = container id; prints restarts before -> after, fails if not restarted
+  local c=$1 rc0 st rc1
+  rc0=$(docker inspect -f '{{.RestartCount}}' "$c")
+  docker exec "$c" python -c "$(kill_worker_py services.executor.main)" >/dev/null 2>&1 || true
+  sleep 3
+  st=$(docker inspect -f '{{.State.Status}}' "$c"); rc1=$(docker inspect -f '{{.RestartCount}}' "$c")
+  [ "$st" = "running" ] && [ "$rc1" -gt "$rc0" ] || fail "executor not restarted (status=$st restarts=$rc0->$rc1)"
+  echo "  $(name_of "$c") restarted (restarts $rc0 -> $rc1)"
+}
+
+cmd_kill_executor() {
+  echo "== kill -9 an executor with a payout in flight  ($(ts))"
+  local row="" i
+  for i in $(seq 1 240); do
+    row=$(psql_live "select payout_id, lease_owner from payouts where status='in_flight' and pending_send_at is not null and lease_owner is not null and lease_until > now() limit 1")
+    [ -n "$row" ] && break
+    sleep 0.5
+  done
+  [ -n "$row" ] || fail "no in-flight payout seen within 120 s (are payouts flowing?)"
+  local pid=${row%%|*} owner=${row#*|}
+  local c; c=$(executor_of "$owner") || fail "no executor container for $owner"
+  echo "  payout $pid in flight on $owner ($(name_of "$c"))"
+  local t0; t0=$(now)
+  kill_executor_container "$c"
+  wait_terminal "'$pid'" 90 || fail "$pid not terminal within 90 s of the kill"
+  local st; st=$(psql_live "select status || ' attempts=' || attempt || ' searches=' || search_attempts from payouts where payout_id='$pid'")
+  pass "$pid reached $st $(since "$t0")s after the kill (verify.py checks it was executed once)"
+}
+
+cmd_kill_executor_in_maintenance() {
+  local max=${1:-700}
+  echo "== kill -9 an executor during a bank maintenance window  ($(ts))"
+  local i m
+  for i in $(seq 1 "$max"); do m=$(bank_maintenance); [ "$m" = "True" ] && break; sleep 1; done
+  [ "$m" = "True" ] || fail "bank never entered maintenance within ${max}s"
+  echo "  bank in maintenance at $(ts)"
+  local rows="" owner=""
+  for i in $(seq 1 60); do
+    rows=$(psql_live "select string_agg(quote_literal(payout_id), ',') from payouts where status in ('in_flight','ambiguous')")
+    owner=$(psql_live "select lease_owner from payouts where status in ('in_flight','ambiguous') and lease_owner is not null and lease_until > now() limit 1")
+    [ -n "$rows" ] && [ -n "$owner" ] && break
+    sleep 1
+  done
+  local c
+  if [ -n "$owner" ]; then
+    c=$(executor_of "$owner") || fail "no executor container for $owner"
+    echo "  killing $owner ($(name_of "$c")), which holds an in_flight/ambiguous payout"
+  else
+    c=$(docker compose ps -q executor | head -1)
+    echo "  no leased in_flight/ambiguous row right now; killing $(name_of "$c") anyway"
+  fi
+  kill_executor_container "$c"
+  for i in $(seq 1 400); do m=$(bank_maintenance); [ "$m" = "False" ] && break; sleep 1; done
+  [ "$m" = "False" ] || fail "maintenance did not end"
+  echo "  maintenance over at $(ts)"
+  if [ -n "$rows" ]; then
+    local n; n=$(echo "$rows" | tr ',' '\n' | wc -l)
+    wait_terminal "$rows" 120 || fail "payouts in flight during maintenance not terminal 120 s after it ended"
+    local amb; amb=$(psql_live "select count(*) from payouts where payout_id in ($rows) and search_attempts > 0")
+    pass "$n payouts in flight during maintenance all terminal; $amb resolved via search"
+  else
+    pass "executor killed in maintenance and restarted; no payouts were in flight"
+  fi
+}
+
 cmd_scale_consumers() {
   local n=${1:-6}
   echo "== scale consumers to $n  ($(ts))"
@@ -191,12 +276,16 @@ case "${1:-}" in
   restart-postgres)  cmd_restart_postgres ;;
   kill-consumer)     cmd_kill_consumer ;;
   scale-consumers)   cmd_scale_consumers "${2:-6}" ;;
+  kill-executor)     cmd_kill_executor ;;
+  kill-executor-in-maintenance) cmd_kill_executor_in_maintenance "${2:-700}" ;;
   all)
     cmd_kill_leader;       echo "  settling 10 s"; sleep 10
     cmd_pause_leader 45;   echo "  settling 10 s"; sleep 10
     cmd_restart_postgres;  echo "  settling 10 s"; sleep 10
     cmd_kill_consumer;     echo "  settling 10 s"; sleep 10
-    cmd_scale_consumers 6
+    cmd_scale_consumers 6;  echo "  settling 10 s"; sleep 10
+    cmd_kill_executor;      echo "  settling 10 s"; sleep 10
+    cmd_kill_executor_in_maintenance
     echo "== FAULTS: PASS" ;;
-  *) sed -n '2,15p' "$0"; exit 2 ;;
+  *) sed -n '2,17p' "$0"; exit 2 ;;
 esac

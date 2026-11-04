@@ -8,6 +8,7 @@ pytestmark = pytest.mark.integration
 EXPECTED = {
     "merchants", "auths", "captures", "processed_events", "channel_progress", "ledger_history",
     "platform_fees", "payouts", "payout_attempts", "session_lease", "bank_token", "leader_lock",
+    "executor_heartbeat",
 }
 
 
