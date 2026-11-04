@@ -352,6 +352,40 @@ Rules, derived from `bank.py`:
 
 **Why.** Fault #6 restarts Postgres. Treating "can't reach the DB" as "lost the lock" drops the session for the outage plus a full failover, for no safety gain: the correctness guard is the gateway epoch (D2), not the lock. **Known race:** after an outage longer than `lease_ttl`, the standby may acquire before the leader's first renew succeeds; the leader then sees `LOST` and a failover happens anyway. Safe (gateway supersede + epoch), just not free.
 
+## D21. Consumer skips stale-epoch messages (cached fence)
+
+**Decision.** In the batch transaction, a message whose `session_epoch` is lower than the fence (`session_lease.epoch`) gets outcome `stale_epoch`: it is skipped before any write and counted (`consumer_stale_epoch_total`). The fence is read at most every 2 s (`ConsumerConfig.fence_refresh_s`), not per message (`services/consumer/adapters/pg_ledger_store.py:169–170`, `services/consumer/app.py:138`).
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| No epoch check; rely on dedupe (`processed_events`) + contiguity only | Still correct (D4, D22), but a stale leader's output is invisible: no metric, no log |
+| Read the fence from Postgres for every message | One extra round trip per event on the hot path |
+| **Cached fence, refreshed every 2 s** (chosen) | A message from a session superseded < 2 s ago may still be applied — harmless, because dedupe and contiguity hold regardless |
+
+**Why it is safe to skip.** The newest session resumed from `channel_progress` (D14), so everything not yet applied is re-sent under the new epoch; a skipped stale message is never the only copy. Measured on the fresh milestone-1 stack: ~7,700 `stale_epoch` skips after reconnects, 0 out-of-order, verify PASS.
+
+**Cost accepted.** After each reconnect the in-flight old-epoch tail is skipped and re-sent once — the same order of cost as D14's re-send.
+
+---
+
+## D22. An out-of-order message leaves no `processed_events` row
+
+**Decision.** If the contiguity check fails (`seq != last_seq + 1`, `pg_ledger_store.py:201–203`), the `processed_events` row inserted for that event earlier in the same batch is deleted before commit (`drop_pe`, `pg_ledger_store.py:182, 300–301`), and the message is skipped as `out_of_order` (or `duplicate` if already covered). A later in-order redelivery of the same seq can then apply.
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| Keep the dedupe row | The seq is now "processed" but was never applied; its redelivery is skipped as a duplicate — a **silent permanent hole** in the ledger |
+| Park the message (don't commit the offset) | Blocks every merchant on the partition; liveness hazard (D18) |
+| **Delete the dedupe row and skip** (chosen) | The message is lost locally, but D14 guarantees the reader re-requests from the checkpoint on its next reconnect |
+
+**Why.** Together with D18 this makes the skip self-healing. Expected counter value is 0; any increment pages (D31). Verified by `tests/integration/consumer/test_pg_ledger_store.py` (out-of-order seq skipped, then applied when redelivered) and by 0 `out_of_order` on every fresh-stack run.
+
+---
+
 ## D23. API readiness reflects its own dependencies only
 
 **Decision.** The read API's `/readyz` checks PostgreSQL only, with a 1 s timeout, and returns 503 on failure or timeout. It does not check the broker, Redis, the gateway or the bank. Broker and session health are reported by the readers' and consumers' own `/readyz` (role, `session_epoch`, assigned partitions).
@@ -466,6 +500,7 @@ Full rationale, options and the reconciliation between the three design sections
 
 | Date | Change |
 |---|---|
+| 2026-11-04 | D21 (stale-epoch skip) and D22 (out-of-order leaves no dedupe row) recorded here; they were decided in Step 3 (`docs/STEP3-PLAN.md`) but missing from this file. |
 | 2026-11-04 | D28–D31 added for Step 9: Prometheus DNS service discovery, Alloy → Loki with low-cardinality labels, Grafana anonymous viewer + file provisioning, alert rules from DESIGN.md §8. |
 | 2026-11-04 | D32 added: observability is self-hosted Prometheus + Loki + Grafana because this is a local assessment; in a cloud deployment the managed equivalents (e.g. AWS CloudWatch, AMP, Managed Grafana) would be used. |
 | 2026-11-04 | D24–D27 and D6 revision recorded after Step 5; both milestones PASS with 0 double payments. |
