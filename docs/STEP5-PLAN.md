@@ -154,13 +154,22 @@ Agent 3 codes against the §3 contracts and fakes, so it doesn't wait for agents
 4. If a double payment appears: run the audit queries in C §5.4 against `payout_attempts`.
 
 ## 6. Checklist
-- [ ] Agent 1: domain + unit tests
-- [ ] Agent 2: migration, models, ports, adapters, compose overrides + integration tests
-- [ ] Agent 3: app, main, fakes, app tests, faults.sh subcommands
-- [ ] Wire, rebuild, unit + integration green
+- [x] Agent 1: domain + unit tests
+- [x] Agent 2: migration, models, ports, adapters, compose overrides + integration tests
+- [x] Agent 3: app, main, fakes, app tests, faults.sh subcommands
+- [x] Wire, rebuild, unit + integration green
 - [ ] Milestone 1 (default chaos) PASS; milestone 2 (shrunk windows) PASS; fault run PASS
 - [ ] DECISIONS.md: D24–D27, D6 revision; DESIGN.md §7 numbers taken from B §5 and A §4.4
 - [ ] Commit on `feature/step-5-payouts`, PR, tick PLAN.md
+
+## Execution notes (2026-11-04)
+
+**Milestone 1, fresh stack, default bank chaos: `verify.py check` → RESULT: PASS (all six sections).**
+- 500,000 frames / 200 channels; 1,868 payouts: 1,015 paid, 18 failed (closed accounts), 835 rejected. Bank ledger: exactly one execution per paid payout, none for failed/rejected.
+- Bank stats over the run: 2,311 POSTs, 1,015 executed, 1,196 maintenance 503s, 33 fail-before-commit, 21 fail-after-commit (502), 21 hang-after-commit, 27 idempotent replays, 22 rate-limit 429s, 0 in-flight 409s, 0 invalid tokens, 10 tokens issued.
+- as_of p99 6.2 ms over HTTP (600 queries). Consumer `out_of_order_total` = 0 on all four consumers on the fresh stack (closes the Step 3 question).
+- Maintenance behaviour observed: during a 150 s window ~190–400 payouts sat in `in_flight` with no lease and `next_attempt_at` set, no thread held; the backlog cleared in ~20 s after the window ended.
+- Agent-found bugs fixed before the run: bank keep-alive poisoning (503/401 answered before the body is read → `Connection: close` on payout POSTs); limiter burst on Redis wipe (36 → ≤ 18–21 per window).
 
 ## 7. Deferred
 - Reconciliation sweep for the residual double-pay window (A §4.4): designed and measured as a metric only; a scheduled sweep job is a DESIGN.md item.

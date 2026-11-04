@@ -121,7 +121,7 @@ Decisions to write down (they feed DESIGN.md directly):
 - [x] `GET /v1/merchants/{id}/balance` (+ `last_seq`), `?as_of=` (index lookup, p99 < 50 ms), `GET /v1/platform/balances`, `GET /v1/payouts/{id}` (404 until applied).
 - [x] `/healthz`, `/readyz` (DB + broker reachable), `/metrics`.
 
-### Step 5 — Payout executors (2:45–3:45)  ← highest-risk area — 📝 planned: `docs/STEP5-PLAN.md`
+### Step 5 — Payout executors (2:45–3:45)  ← highest-risk area — 🔧 milestone 1 PASS (all six verify sections); shrunk-window run + faults pending (`docs/STEP5-PLAN.md`)
 - [ ] Shared OAuth token: single holder in Postgres/Redis with lease; refresh ≤ 1 per 5 s; all executors reuse the same token (new token revokes old).
 - [ ] Shared limits: global 20 req/s payouts, 10 req/s searches, 2 in-flight per `account` — cross-process limiter (Redis fast-path, but **must degrade safely when Redis is wiped**: fall back to Postgres row leases / conservative rate).
 - [ ] Claim a payout with a DB lease (`FOR UPDATE SKIP LOCKED`, lease expiry) so a crashed executor's work is reclaimed.
