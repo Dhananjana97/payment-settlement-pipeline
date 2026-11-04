@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import socket
+import uuid
 from dataclasses import dataclass, field
 
 
@@ -70,7 +71,9 @@ class Settings:
         name = service_name or _env("SERVICE_NAME", "unknown")
         return cls(
             service_name=name,
-            instance_id=f"{socket.gethostname()}:{os.getpid()}",
+            # Unique per process incarnation: a restarted container reuses hostname AND pid, and a
+            # reused identity would let the new process inherit the old one's lease (incumbent L4).
+            instance_id=f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}",
             dsn=_env("DATABASE_URL", "postgresql+psycopg://ledger:ledger@postgres:5432/ledger"),
             kafka_bootstrap=_env("KAFKA_BOOTSTRAP", "redpanda:9092"),
             topic=_env("KAFKA_TOPIC", "ledger-events"),

@@ -17,6 +17,7 @@ x-service: &service
     context: .
     dockerfile: services/Dockerfile
   env_file: .env
+  init: true            # tini as PID 1: signals reach the worker, exit codes propagate, restart policy fires
   restart: unless-stopped
   stop_grace_period: 5s
   depends_on:
@@ -148,6 +149,7 @@ services:
     command: ["python", "-m", "services.api.main"]
     environment:
       SERVICE_NAME: api
+    init: true
     restart: unless-stopped
     stop_grace_period: 5s
     ports:

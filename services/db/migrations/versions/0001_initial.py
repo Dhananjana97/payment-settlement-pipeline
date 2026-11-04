@@ -20,13 +20,16 @@ branch_labels = None
 depends_on = None
 
 
+INITIAL_TABLES = [t for t in Base.metadata.sorted_tables if t.name != "leader_lock"]
+
+
 def upgrade() -> None:
     bind = op.get_bind()
-    Base.metadata.create_all(bind)
+    Base.metadata.create_all(bind, tables=INITIAL_TABLES)
     # singleton rows so adapters can always UPDATE … WHERE singleton = 1
     bind.execute(sa.text("INSERT INTO session_lease (singleton, epoch) VALUES (1, 0) ON CONFLICT DO NOTHING"))
     bind.execute(sa.text("INSERT INTO bank_token (singleton) VALUES (1) ON CONFLICT DO NOTHING"))
 
 
 def downgrade() -> None:
-    Base.metadata.drop_all(op.get_bind())
+    Base.metadata.drop_all(op.get_bind(), tables=INITIAL_TABLES)

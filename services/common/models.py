@@ -161,6 +161,15 @@ class SessionLease(Base):
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class LeaderLock(Base):
+    """Lease row for reader election (D12). Liveness only; the epoch fence is the correctness guard."""
+    __tablename__ = "leader_lock"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holder: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class BankToken(Base):
     """Single row: the one live OAuth token shared by every executor (D6)."""
     __tablename__ = "bank_token"

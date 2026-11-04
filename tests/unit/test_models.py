@@ -6,10 +6,10 @@ from services.common.models import PAYOUT_PUBLIC_STATUS, PAYOUT_STATUSES, ALL_TA
 MONEY_SUFFIX = "_minor"
 
 
-def test_eleven_tables():
+def test_twelve_tables():
     assert sorted(t.name for t in ALL_TABLES) == sorted([
         "merchants", "auths", "captures", "processed_events", "channel_progress", "ledger_history",
-        "platform_fees", "payouts", "payout_attempts", "session_lease", "bank_token",
+        "platform_fees", "payouts", "payout_attempts", "session_lease", "bank_token", "leader_lock",
     ])
 
 
