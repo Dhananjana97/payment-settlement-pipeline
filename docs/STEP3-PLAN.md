@@ -201,7 +201,8 @@ Then: `docker exec <consumer> python -c "import os,signal;os.kill(1,9)"`-style k
 - **Tests:** 121 unit; integration green (store: concurrent double-apply → once, crash mid-batch → replay identical, out-of-order skip then apply, stale epoch, history rows for rejected/ignored, fee shard = partition; consumer e2e vs `apply_event`).
 - **Test isolation fix:** the integration session fixture used to run `downgrade base` on the live `ledger` database, which wiped it mid-run. Tests now create and use `ledger_test` and refuse to run against `ledger`. `tests/incumbent/test_p4_outbox_cursor_skips_late_commit.py` (Part C) still defaults to the live DB and must be repointed.
 - **Open:** one consumer counted 3,400 `out_of_order` messages, where D18 expects zero. Likely leftovers in the topic from the period when the live DB was wiped and rebuilt; to be confirmed on the fresh-stack milestone run. 2.9 M `stale_epoch` skips are old-session messages in the topic (expected).
-- **Pending:** milestone `verify.py check` on a fresh stack; full `faults.sh kill-consumer` + `scale-consumers 6` run (the kill/restart worked; the scale run was interrupted).
+- **Milestone (live stack, chaos on, 500,000 frames / 200 channels):** `verify.py check` → drain PASS, balance PASS, platform PASS, as_of PASS (600 queries, p50 3.9 ms, p99 8.4 ms). payout_status/bank FAIL as expected until Step 5: the 835 rejected payouts are already correct; the 1,015 to-pay and 18 to-fail are `pending`. Run against the stack that had been wiped and rebuilt mid-run, which makes it a stronger check of resume and dedupe, not a weaker one.
+- **Pending:** the same check on a fresh `down -v` stack; full `faults.sh kill-consumer` + `scale-consumers 6` run (the kill/restart worked; the scale run was interrupted).
 
 ## 6. Deferred
 - Per-merchant daily payout limit, `CHANNEL_RESET`: new effect / new rule branch in `rules.py` (debrief).
