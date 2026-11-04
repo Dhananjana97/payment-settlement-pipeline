@@ -29,9 +29,8 @@ The rule "verify in code, not docs" paid off. The brief says the bank allows 50 
 | # | What the AI did | How we noticed | Fix |
 |---|---|---|---|
 | 1 | **Skipped basic engineering practice unless told:** a hand-written `schema.sql` with raw SQL, I/O mixed into business logic, tests left to the end. | Human review of the Step 1 plan, before any code. | Made them rules: SQLAlchemy + Alembic (D11); `ports.py` / `domain/` / `adapters/` in every service; tests in every step's "done when". That structure is what allowed exact conformance against the harness (475,144 events) and the crash-point tests. |
-| 2 | **Integration tests wiped the live database.** The fixture ran `downgrade base` on `ledger`. | Consumers logged missing tables and deadlocks mid-run. | Tests use `ledger_test` and refuse `ledger` (`tests/conftest.py`). |
-| 3 | **A restarted reader inherited its own stale lease.** The `hostname:pid` identity was reused after a restart: the same bug we had flagged in the incumbent (L4). | The `kill -9` fault test showed no handover. | Per-process nonce in `instance_id` (`services/common/config.py:76`). Handover is now 8–11 s. |
-| 4 | **Bank keep-alive connections were poisoned.** `bank.py` answers 503/401 before reading the body. | An integration test against the real bank got a `501` on a search. | `Connection: close` on payout POSTs (`http_bank.py`). |
+| 2 | **A restarted reader inherited its own stale lease.** The `hostname:pid` identity was reused after a restart: the same bug we had flagged in the incumbent (L4). | The `kill -9` fault test showed no handover. | Per-process nonce in `instance_id` (`services/common/config.py:76`). Handover is now 8–11 s. |
+| 3 | **Bank keep-alive connections were poisoned.** `bank.py` answers 503/401 before reading the body. | An integration test against the real bank got a `501` on a search. | `Connection: close` on payout POSTs (`http_bank.py`). |
 
 Other corrections, each caught by a fault run or test:
 - the first fault test used `docker kill`, so the restart policy never fired;
