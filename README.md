@@ -20,6 +20,8 @@ gateway:7100 ──BOSP──▶ reader ×2 (1 leader, Postgres lease, epoch fen
 
 ## 1. Run it
 
+**Prerequisites:** Docker with Compose v2, and Python 3.10+ for the verifier (`harness/verify.py` uses only the standard library, so no virtualenv is needed). From the zip: `unzip settlement-stream.zip && cd settlement-stream`. The zip includes `.git`, so `git log` shows the history.
+
 ```bash
 docker compose up -d --build --wait                         # everything, incl. harness gateway + bank
 python harness/verify.py watch --api http://localhost:8080   # live backlog until "caught up"
