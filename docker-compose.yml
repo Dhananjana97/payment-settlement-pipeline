@@ -42,6 +42,16 @@ services:
       BANK_P_FAIL_AFTER_COMMIT: "${BANK_P_FAIL_AFTER_COMMIT:-0.03}"
       BANK_P_HANG_AFTER_COMMIT: "${BANK_P_HANG_AFTER_COMMIT:-0.02}"
 
+  # The harness compose passes only six GATEWAY_* knobs through; these are read by
+  # gateway.py:431-434 but not passed, so §5.4 #8 ("5x drop rate, disconnects every 20-40 s")
+  # could not be set without this. Defaults equal gateway.py's own.
+  gateway:
+    environment:
+      GATEWAY_DROP_RATE: "${GATEWAY_DROP_RATE:-0.002}"
+      GATEWAY_DUP_RATE: "${GATEWAY_DUP_RATE:-0.001}"
+      GATEWAY_DISCONNECT_MIN_S: "${GATEWAY_DISCONNECT_MIN_S:-60}"
+      GATEWAY_DISCONNECT_MAX_S: "${GATEWAY_DISCONNECT_MAX_S:-180}"
+
   postgres:
     image: postgres:16
     environment:

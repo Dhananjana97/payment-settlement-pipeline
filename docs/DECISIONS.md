@@ -384,10 +384,30 @@ Full rationale, options and the reconciliation between the three design sections
 
 ---
 
+## D32. Observability: self-hosted Prometheus + Loki + Grafana, not a cloud service
+
+**Decision.** Run Prometheus (metrics), Loki + Grafana Alloy (logs) and Grafana (dashboards, alerts) as containers in our compose file (Step 9, `docs/STEP9-PLAN.md`).
+
+**Options.**
+
+| Option | Fits a local assessment? | Notes |
+|---|---|---|
+| **Cloud managed stack** (AWS: CloudWatch Logs + Logs Insights, CloudWatch metrics or Amazon Managed Service for Prometheus, Amazon Managed Grafana, CloudWatch alarms → SNS) | No | What we would use in a cloud deployment: no servers to run, retention and paging included. Needs an AWS account, credentials and cost, and can't run on a reviewer's clean machine. |
+| Hosted SaaS (Datadog, Grafana Cloud, New Relic) | No | Same problem: accounts and API keys. |
+| **Self-hosted Prometheus + Loki + Grafana** (chosen) | Yes | Open source, starts with `docker compose up`, no account or cost. Our services already expose Prometheus `/metrics` and JSON logs. |
+| No collector (status quo) | Partly | `/metrics` per container and `/v1/ops/status` only: no history, no aggregation across replicas, no log search. |
+
+**Why.** The assessment must run locally with one command. The chosen stack maps one-to-one onto the managed equivalents (Prometheus → AMP / CloudWatch metrics, Loki → CloudWatch Logs, Grafana → Amazon Managed Grafana), so in production the dashboards, PromQL queries and alert rules move over with a datasource change, and the services' code does not change at all (they keep writing JSON logs to stdout and exposing `/metrics`).
+
+**Cost accepted.** We operate the stack ourselves: retention, storage and alert delivery are local only (no external paging in the assessment).
+
+---
+
 ## Changes log
 
 | Date | Change |
 |---|---|
+| 2026-11-04 | D32 added: observability is self-hosted Prometheus + Loki + Grafana because this is a local assessment; in a cloud deployment the managed equivalents (e.g. AWS CloudWatch, AMP, Managed Grafana) would be used. |
 | 2026-11-04 | D24–D27 and D6 revision recorded after Step 5; both milestones PASS with 0 double payments. |
 | 2026-11-04 | D5 adjusted after reading `bank.py`: same-key retry first, search only when the key may have expired. |
 | 2026-11-04 | D6 adjusted: bank limit is 20 req/s in `bank.py`, not the 50 in the brief. |
