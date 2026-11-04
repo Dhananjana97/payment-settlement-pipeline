@@ -1,0 +1,366 @@
+# Grafana-managed alert rules (D31): DESIGN.md §8 'what pages a human'.
+# Delivery: Grafana's default contact point only (no external paging in the assessment).
+apiVersion: 1
+groups:
+- orgId: 1
+  name: paging
+  folder: Settlement
+  interval: 30s
+  rules:
+  - uid: dup-bank-reference
+    title: Duplicate bank reference (double payment)
+    condition: C
+    for: 0s
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: page
+      team: settlement
+    annotations:
+      summary: "A bank search returned more than one payout for one reference: a payout was executed twice (P1). See payout_attempts and DESIGN.md \xA77."
+    data:
+    - refId: A
+      datasourceUid: prom
+      relativeTimeRange:
+        from: 300
+        to: 0
+      model:
+        refId: A
+        expr: sum(bank_duplicate_reference_total) or vector(0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: replaceNN
+          replaceWithValue: 0
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+  - uid: payout-stuck
+    title: Payout stuck (needs a human)
+    condition: C
+    for: 0s
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: page
+      team: settlement
+    annotations:
+      summary: 'A payout is in status stuck: the bank replied in a way that can only mean our bug (invalid_request, key reused, search row mismatch, attempts exhausted). It is never retried automatically.'
+    data:
+    - refId: A
+      datasourceUid: prom
+      relativeTimeRange:
+        from: 300
+        to: 0
+      model:
+        refId: A
+        expr: max(payouts_by_status{service="executor",status="stuck"}) or vector(0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: replaceNN
+          replaceWithValue: 0
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+  - uid: consumer-out-of-order
+    title: Consumer out-of-order messages
+    condition: C
+    for: 0s
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: page
+      team: settlement
+    annotations:
+      summary: 'A consumer skipped a message whose seq was ahead of last_seq+1 (D18). Expected value is zero: this means an upstream ordering bug.'
+    data:
+    - refId: A
+      datasourceUid: prom
+      relativeTimeRange:
+        from: 300
+        to: 0
+      model:
+        refId: A
+        expr: sum(increase(consumer_events_total{outcome="out_of_order"}[5m])) or vector(0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: replaceNN
+          replaceWithValue: 0
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+  - uid: no-reader-leader
+    title: No reader holds the gateway session
+    condition: C
+    for: 30s
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: page
+      team: settlement
+    annotations:
+      summary: "No reader replica has reader_is_leader=1 for 30 s: nothing is being ingested. Failover should take < 15 s (measured 8\u201311 s)."
+    data:
+    - refId: A
+      datasourceUid: prom
+      relativeTimeRange:
+        from: 300
+        to: 0
+      model:
+        refId: A
+        expr: sum(reader_is_leader{service="reader"}) or vector(0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: replaceNN
+          replaceWithValue: 0
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: lt
+            params:
+            - 1
+  - uid: consumer-malformed
+    title: Malformed (poison) messages
+    condition: C
+    for: 0s
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: warn
+      team: settlement
+    annotations:
+      summary: A message could not be decoded; its offset was committed and the partition kept moving. Inspect the consumer logs for partition/offset.
+    data:
+    - refId: A
+      datasourceUid: prom
+      relativeTimeRange:
+        from: 300
+        to: 0
+      model:
+        refId: A
+        expr: sum(increase(consumer_events_total{outcome="malformed"}[5m])) or vector(0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: replaceNN
+          replaceWithValue: 0
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0
+  - uid: consumer-lag-high
+    title: Consumer lag above 50k
+    condition: C
+    for: 2m
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: warn
+      team: settlement
+    annotations:
+      summary: Total broker lag across partitions has been above 50,000 for 2 minutes.
+    data:
+    - refId: A
+      datasourceUid: prom
+      relativeTimeRange:
+        from: 300
+        to: 0
+      model:
+        refId: A
+        expr: sum(max by (partition)(consumer_partition_lag{service="consumer"})) or vector(0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: replaceNN
+          replaceWithValue: 0
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 50000
+  - uid: limiter-fallback
+    title: Rate limiter on local fallback
+    condition: C
+    for: 10m
+    noDataState: OK
+    execErrState: Error
+    labels:
+      severity: warn
+      team: settlement
+    annotations:
+      summary: Executors have used the local-share limiter (Redis unavailable) for 10 minutes. Payouts continue at a conservative rate.
+    data:
+    - refId: A
+      datasourceUid: prom
+      relativeTimeRange:
+        from: 300
+        to: 0
+      model:
+        refId: A
+        expr: max(limiter_fallback{service="executor"}) or vector(0)
+        instant: true
+        range: false
+        intervalMs: 15000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: replaceNN
+          replaceWithValue: 0
+    - refId: C
+      datasourceUid: __expr__
+      relativeTimeRange:
+        from: 0
+        to: 0
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0

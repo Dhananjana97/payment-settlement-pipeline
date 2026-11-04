@@ -384,6 +384,65 @@ Full rationale, options and the reconciliation between the three design sections
 
 ---
 
+## D28. Prometheus finds replicas by DNS service discovery on compose service names
+
+**Decision.** `dns_sd_configs` (type A, port 9100) on `reader`, `consumer`, `executor`, and port 8080 on `api`. A relabel copies the service name into `job`; `instance` is the container IP. Scrape every 5 s.
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| Static targets per container | Breaks on `--scale`; container names change |
+| `docker_sd_configs` | Needs the Docker socket mounted into Prometheus (root-equivalent access) for no extra value here |
+| **DNS SD on the service name** (chosen) | Docker's embedded DNS returns one A record per replica, so `--scale consumer=6` is picked up on the next refresh |
+
+**Why.** Scale-aware with no privileged mount. **Cost accepted.** `instance` is an IP, not a container name; the `service` label plus the logs' `instance` field identify the process.
+
+---
+
+## D29. Logs: Grafana Alloy reads Docker logs; only low-cardinality fields become Loki labels
+
+**Decision.** Alloy discovers this compose project's containers through the Docker API (socket mounted **read-only**), tails their JSON logs, and ships them to Loki. `service` and `level` are labels. `payout_id`, `event_id`, `session_epoch`, `channel`, `instance` stay in the line / structured metadata and are filtered with `| json`.
+
+**Options.**
+
+| Option | Problem |
+|---|---|
+| Promtail | End-of-life; Alloy is its successor |
+| Docker Loki logging driver | Needs a plugin installed on the host: not a one-command start |
+| Ids as labels | One stream per payout / event: Loki's cardinality limits and memory blow up at 7 k payouts, let alone 1.5 M |
+| **Alloy + low-cardinality labels** (chosen) | Services unchanged (they keep writing JSON to stdout); ids still searchable |
+
+**Why.** Zero service changes and bounded index size. **Cost accepted.** The read-only Docker socket gives Alloy visibility of all containers on the host; acceptable for a local assessment, replaced by the platform's log agent in production (D32).
+
+---
+
+## D30. Grafana: anonymous Viewer, everything provisioned from files
+
+**Decision.** Anonymous access with role Viewer; admin password from `.env`. Datasources (Prometheus, Loki), dashboards ("Settlement overview", "Trace") and alert rules are provisioned from `observability/grafana/`.
+
+**Options.** Login required (friction for a reviewer, nothing to protect locally); click-built dashboards (not reproducible, lost on `down -v`); **file provisioning** (chosen: in git, identical on every machine).
+
+**Why.** A reviewer opens `localhost:3000` and the dashboards are there. **Cost accepted.** Anonymous access is for local use only; production uses SSO.
+
+---
+
+## D31. Alert rules are DESIGN.md §8's "pages a human" column
+
+**Decision.** Grafana-managed rules for exactly the conditions DESIGN.md §8 says must page:
+- `bank_duplicate_reference_total > 0` (possible double payment);
+- `payouts_by_status{status="stuck"} > 0`;
+- `consumer_events_total{outcome="out_of_order"}` or `{outcome="malformed"}` increasing;
+- total `consumer_partition_lag` > 50 k for 2 min;
+- no `reader_is_leader == 1` for 30 s (failover budget is 15 s / 30 s);
+- `limiter_fallback == 1` for 10 min.
+
+**Options.** No alerts (operator must watch dashboards); Alertmanager with external routes (no contact points exist on a reviewer's machine); **Grafana-managed rules shown in Grafana's alert list** (chosen).
+
+**Why.** The design's paging claims become checkable rules, not prose. **Cost accepted.** No external delivery locally; production routes them to the on-call tool (D32).
+
+---
+
 ## D32. Observability: self-hosted Prometheus + Loki + Grafana, not a cloud service
 
 **Decision.** Run Prometheus (metrics), Loki + Grafana Alloy (logs) and Grafana (dashboards, alerts) as containers in our compose file (Step 9, `docs/STEP9-PLAN.md`).
@@ -407,6 +466,7 @@ Full rationale, options and the reconciliation between the three design sections
 
 | Date | Change |
 |---|---|
+| 2026-11-04 | D28–D31 added for Step 9: Prometheus DNS service discovery, Alloy → Loki with low-cardinality labels, Grafana anonymous viewer + file provisioning, alert rules from DESIGN.md §8. |
 | 2026-11-04 | D32 added: observability is self-hosted Prometheus + Loki + Grafana because this is a local assessment; in a cloud deployment the managed equivalents (e.g. AWS CloudWatch, AMP, Managed Grafana) would be used. |
 | 2026-11-04 | D24–D27 and D6 revision recorded after Step 5; both milestones PASS with 0 double payments. |
 | 2026-11-04 | D5 adjusted after reading `bank.py`: same-key retry first, search only when the key may have expired. |
