@@ -26,6 +26,17 @@
 
 **Inconsistency in the brief to address explicitly (§5 of DESIGN):** 450 M events/month × 84 months ≈ **37.8 B** events. Our `ledger_history` has one row per DATA frame, so it reaches ~35 B rows (≈ 95 % of frames are DATA), not 3 B. DESIGN answers **both**: the brief's 3 B, and what our per-event history really costs. The fix for the second is in §5: per-merchant daily snapshots plus in-day replay, or keeping only balance-changing events.
 
+## 0a. Brief constraints that override harness numbers (ASSIGNMENT §2 / §6, re-read verbatim)
+
+| Constraint | Where it bites |
+|---|---|
+| "Losing an event the gateway has delivered and we have **credited** is not acceptable" | §1, §3: credit only after broker ack (D10); a credited-but-unpublished frame is re-requested on resume from `channel_progress` (D14) inside the 72 h replay |
+| Production reader failover **≤ 30 s** (harness A1 says 15 s) | §2: measured 8.6 s / 9.0 s against both |
+| Bank in production: **50 req/s per client**, 2 in-flight per account, key TTL 120 s, one token per client, **maintenance up to 20 min** (harness: 20/s, 150 s) | §7, §8: redo maintenance for 20 min; 60 k payouts deferred per window |
+| §5 graded at **3 B rows**, exact `as_of` < 200 ms at any instant within 7 years | §5: answer at 3 B first; the 37.8 B gap as a labelled note |
+| "Generic prose scores zero"; "diagrams welcome; walls of generated text are not"; **≤ ~8 pages** | all: tables over paragraphs; budget W1 ≈ 2¼, W2 ≈ 3, W3 ≈ 3 pages |
+| Every §6 sub-question answered visibly and separately (e.g. §2 "who checks the token", §4 "partition's **or worker's** throughput", §6 "**name** the lock", §8 "detect and repair the ledger **and the session checkpoint**", "what **pages a human**") | each section uses the sub-questions as its headings or table rows |
+
 ## 1. Section-by-section outline
 
 Each section: **claim → mechanism (with `file:line` or table/column) → number → failure it prevents**. Target length in brackets.
@@ -110,8 +121,8 @@ Alternative candidates: Postgres leader lease over Redis (D12); a per-event hist
 | Main | `DESIGN.md` | assemble, fill placeholders, cut to ~8 pages, check every number has a source |
 
 ## 4. Checklist
-- [ ] M1–M4 measured
-- [ ] W1/W2/W3 drafts
-- [ ] Step 5 milestone done → M5 → §7 filled
-- [ ] Assembled `DESIGN.md`, ≤ ~8 pages, every number sourced, the 37.8 B vs 3 B gap addressed
-- [ ] Commit on `feature/step-7-design`, tick PLAN.md
+- [x] M1–M4 measured
+- [x] W1/W2/W3 drafts
+- [x] Step 5 milestone done → M5 → §7 filled
+- [x] Assembled `DESIGN.md`, ≤ ~8 pages, every number sourced, the 37.8 B vs 3 B gap addressed
+- [x] Commit on `feature/step-7-design`, tick PLAN.md
