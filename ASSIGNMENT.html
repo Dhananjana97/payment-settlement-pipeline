@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Blue Ocean Backend Assignment v2</title><style>
+:root{--bg:#fff;--fg:#1d2330;--muted:#5b6474;--line:#e3e7ee;--code:#f4f6f9;--accent:#0b5cad;--quote:#eef4fb}
+@media (prefers-color-scheme: dark){:root{--bg:#11151c;--fg:#e4e8ef;--muted:#9aa4b2;--line:#2a313c;--code:#1a2029;--accent:#6aa9ec;--quote:#17202c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+main{max-width:920px;margin:0 auto;padding:32px 16px 80px}
+h1{font-size:2rem;line-height:1.25;margin:0 0 .5rem}
+h2{margin-top:2.4rem;padding-top:.6rem;border-top:1px solid var(--line);font-size:1.45rem}
+h3{margin-top:1.6rem;font-size:1.15rem}
+a{color:var(--accent)}
+code{background:var(--code);padding:.1em .35em;border-radius:4px;font-size:.92em;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+pre{background:var(--code);padding:14px 16px;border-radius:8px;overflow-x:auto;border:1px solid var(--line)}
+pre code{background:none;padding:0}
+table{border-collapse:collapse;width:100%;margin:1rem 0;font-size:.95rem;display:block;overflow-x:auto}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--code)}
+blockquote{margin:1rem 0;padding:.6rem 1rem;background:var(--quote);border-left:4px solid var(--accent);border-radius:4px}
+hr{border:0;border-top:1px solid var(--line);margin:2rem 0}
+</style></head>
+<body><main>
+<h1 id="blue-ocean-backend-assignment-v2-settlement-stream">Blue Ocean Backend Assignment v2: Settlement Stream</h1>
+<p><strong>Track:</strong> Backend / distributed systems / data
+<strong>Time box:</strong> <strong>6 hours, hard limit.</strong> See <a href="#10-how-to-spend-the-6-hours">§10</a>.
+<strong>Version:</strong> v2</p>
+<hr />
+<h2 id="0-read-this-first">0. Read this first</h2>
+<p>You will build the core of a payments settlement pipeline:
+- consume a <strong>multiplexed, sequenced session protocol</strong> from an acquirer gateway;
+- fan events out through a <strong>message broker</strong> to parallel workers, without losing per-merchant order;
+- apply them <strong>exactly once</strong> to a <strong>PostgreSQL ledger</strong>;
+- move money through a <strong>partner bank API</strong> that will happily pay twice if you let it.</p>
+<p>You will also review a previous team's version of the same system, which caused a production incident.</p>
+<p><strong>Use AI tools. We assume you will.</strong> Our engineers use them every day.</p>
+<p>This assignment is designed so that the tools only get you as far as the questions you know how to ask. Every component here has a well-known naive implementation that looks right, passes a happy-path test, and is wrong. The harness is built to find those implementations. So are our reviewers.</p>
+<p>What we are testing:
+- whether you can see the failure modes <strong>before</strong> they happen;
+- whether you can tell your assistant precisely what to build;
+- whether you can tell when what it built is wrong.</p>
+<p><strong>How it is graded:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Part</th>
+<th>What</th>
+<th>Weight</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A</strong></td>
+<td>Working system, run by us under fault injection (§5)</td>
+<td>40</td>
+</tr>
+<tr>
+<td><strong>B</strong></td>
+<td><code>DESIGN.md</code>: production-scale design, with numbers (§6)</td>
+<td>20</td>
+</tr>
+<tr>
+<td><strong>C</strong></td>
+<td><code>REVIEW.md</code>: defects in the incumbent code, with reproducers (§7)</td>
+<td>20</td>
+</tr>
+<tr>
+<td>—</td>
+<td>Code quality and tests</td>
+<td>10</td>
+</tr>
+<tr>
+<td>—</td>
+<td>Observability and operability</td>
+<td>10</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The bar:</strong>
+- <strong>Minimum to pass:</strong> a total ≥ 70, <strong>and</strong> Part A correctness ≥ 20/30, <strong>and</strong> Part C ≥ 12/20.
+- <strong>Double payments.</strong> A single double payment in our standard run caps Part A correctness at 10/30.</p>
+<p><strong>After you submit.</strong> If you pass, a 45-minute technical debrief follows, and you will be asked to change your system live. Build only what you can explain.</p>
+<blockquote>
+<p>The harness numbers in this brief are the defaults. <strong>We run your submission with a different seed, more data, harsher chaos, and the fault-injection schedule in §5.4.</strong> Making <code>verify.py</code> pass on your laptop is necessary, not sufficient.</p>
+</blockquote>
+<hr />
+<h2 id="1-the-scenario-in-plain-terms">1. The scenario, in plain terms</h2>
+<p>Blue Ocean runs payment-processing and settlement systems for property-management and hospitality clients. Card payments flow through an <strong>acquirer</strong>, the company that processes card transactions for a merchant. The acquirer streams every money-moving event for every merchant to us. We keep each merchant's <strong>ledger</strong>, and when a merchant asks for its money we pay it out through a <strong>settlement bank</strong>.</p>
+<p>You do not need a payments background. Here is the whole domain:</p>
+<table>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning here</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Merchant</strong></td>
+<td>A business we settle for, such as a hotel. One merchant is one stream of events.</td>
+</tr>
+<tr>
+<td><strong>AUTH</strong> (authorisation)</td>
+<td>A card payment is approved and the amount is put <strong>on hold</strong>. The merchant cannot spend it yet.</td>
+</tr>
+<tr>
+<td><strong>CAPTURE</strong></td>
+<td>The held payment is taken. The hold is released, and the captured amount minus our fee becomes <strong>settled</strong> money.</td>
+</tr>
+<tr>
+<td><strong>AUTH_EXPIRY</strong></td>
+<td>An authorisation lapses without being captured. Its hold is released.</td>
+</tr>
+<tr>
+<td><strong>REFUND</strong></td>
+<td>The merchant gives money back to a customer from a capture. Settled money goes down.</td>
+</tr>
+<tr>
+<td><strong>CHARGEBACK</strong></td>
+<td>A customer disputes a capture and the bank claws it back, plus a fee. This is forced: it can push a merchant's balance <strong>negative</strong>.</td>
+</tr>
+<tr>
+<td><strong>Reserve</strong></td>
+<td>A per-merchant floor that must stay in the account.</td>
+</tr>
+<tr>
+<td><strong>PAYOUT_REQUEST</strong></td>
+<td>The merchant asks for <code>amount</code> to be sent to its bank account. We approve it only if the money is there.</td>
+</tr>
+<tr>
+<td><strong>Platform fee</strong></td>
+<td>Our revenue, taken on every capture and chargeback.</td>
+</tr>
+</tbody>
+</table>
+<p>That is all the finance. The engineering problem:
+- an <strong>ordered, lossy, duplicating stream</strong> with <strong>strict per-key ordering</strong>;
+- <strong>exactly-once effects</strong> in a database at high throughput;
+- <strong>exactly-once side effects</strong> against an external API that cannot give you exactly-once itself.</p>
+<hr />
+<h2 id="2-production-scale-part-b-is-graded-against-these-numbers">2. Production scale (Part B is graded against these numbers)</h2>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Number</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Merchants</td>
+<td><strong>60,000</strong>, Zipf-skewed. The busiest 1% of merchants generate ~40% of events.</td>
+</tr>
+<tr>
+<td>Event volume</td>
+<td>~<strong>450 M ledger events / month</strong>. Steady <strong>4,000 events/s</strong>, peak <strong>30,000 events/s</strong> (sale days, for hours).</td>
+</tr>
+<tr>
+<td>Ledger retention</td>
+<td><strong>7 years online</strong>, about <strong>3 billion rows</strong> at steady state. Regulators can ask for any merchant's balance at any instant within 7 years: it must be answered <strong>exactly</strong>, in <strong>&lt; 200 ms</strong>.</td>
+</tr>
+<tr>
+<td>Gateway</td>
+<td>One live session per <code>client_id</code>, at most <strong>25,000 frames/s per session</strong>. You may hold up to <strong>16 <code>client_id</code>s</strong>; in production a <code>LOGON</code> may subscribe to a chosen subset of channels. The gateway keeps replay history for <strong>72 hours</strong>.</td>
+</tr>
+<tr>
+<td>Settlement bank</td>
+<td><strong>50 requests/s</strong> per client, <strong>2 in-flight payouts per destination account</strong>, idempotency keys remembered for <strong>120 s</strong>, a single live OAuth token per client, maintenance windows of up to <strong>20 minutes</strong>.</td>
+</tr>
+<tr>
+<td>Payouts</td>
+<td>Usually ~40 k/day, but <strong>month-end brings ~1.5 M payout requests within 6 hours</strong>.</td>
+</tr>
+<tr>
+<td>Availability</td>
+<td>Losing an event the gateway has delivered and we have credited is <strong>not acceptable</strong>. Reader failover must complete within <strong>30 s</strong>. Paying the same payout twice is a <strong>P1 incident</strong>.</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="3-what-we-give-you">3. What we give you</h2>
+<pre><code>harness/                 - run it, read it, do NOT modify it (we run our own copy)
+  gateway.py             BOSP/1 acquirer gateway (TCP 7100, status on 7101)
+  PROTOCOL.md            the session protocol: read it twice
+  bank.py                settlement bank simulator (HTTP 7200)
+  BANK-API.md            the bank's contract and failure behaviour
+  ledger_events.py       deterministic event model + reference ledger rules (used by the verifier)
+  verify.py              checks your system against ground truth
+  docker-compose.harness.yml, Dockerfile, README.md
+incumbent/               - the previous team's code, for Part C
+  README.md, schema.sql, session_reader.py, leader.py, ledger_consumer.py, payouts.py
+</code></pre>
+<p><strong>Harness facts:</strong>
+- Everything in <code>harness/</code> is plain Python 3.11+ standard library, with no dependencies.
+- The default run is 200 merchants × 2,500 frames (500 k frames) at 1,000 frames/s with 4× bursts. That takes ~7 minutes to release.
+- Our review run is ≥ <strong>2 M frames at 3,000 frames/s</strong>.
+- Your pipeline must get events <strong>only over BOSP</strong>. Importing <code>ledger_events</code> to generate, look up or "fix" events in your pipeline is disqualifying. Using it in tests is fine.
+- Your pipeline must never call the bank's <code>/_admin</code> endpoint.</p>
+<hr />
+<h2 id="4-the-ledger-rules-exact">4. The ledger rules (exact)</h2>
+<p>Events arrive as <code>DATA</code> frames. Every event has <code>event_id</code> (<code>"&lt;merchant_id&gt;:&lt;seq&gt;"</code>, globally unique), <code>merchant_id</code>, <code>type</code>, <code>event_time</code> (ISO-8601 UTC, strictly increasing within a channel) and <code>currency</code>. Amounts are <strong>integers in minor units</strong> (cents).</p>
+<p>Per merchant you keep:
+- <code>settled</code>
+- <code>held</code>
+- <code>reserve</code>
+- <code>bank_account</code>
+- <code>currency</code> (fixed by the merchant's first <code>MERCHANT_CONFIG</code>)</p>
+<p><code>available = settled − reserve</code>.</p>
+<p>Events are applied <strong>in channel sequence order</strong>:</p>
+<table>
+<thead>
+<tr>
+<th><code>type</code></th>
+<th>Fields</th>
+<th>Effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>MERCHANT_CONFIG</code></td>
+<td><code>reserve_minor</code>, <code>bank_account</code></td>
+<td>Set <code>reserve</code> and <code>bank_account</code>. The first one also fixes <code>currency</code>.</td>
+</tr>
+<tr>
+<td><code>AUTH</code></td>
+<td><code>amount_minor</code></td>
+<td><code>held += amount</code>. The authorisation is now <strong>open</strong>.</td>
+</tr>
+<tr>
+<td><code>AUTH_EXPIRY</code></td>
+<td><code>ref</code> (an AUTH event_id)</td>
+<td>If that auth is open: close it, <code>held -= its amount</code>. Otherwise <strong>reject</strong> (no effect).</td>
+</tr>
+<tr>
+<td><code>CAPTURE</code></td>
+<td><code>ref</code> (AUTH), <code>amount_minor</code>, <code>fee_minor</code></td>
+<td>If the auth is open <strong>and</strong> <code>amount ≤ auth amount</code>: close the auth; <code>held -= auth amount</code> (the whole hold is released, even on a partial capture); <code>settled += amount − fee</code>; <code>platform[currency] += fee</code>. Otherwise <strong>reject</strong>.</td>
+</tr>
+<tr>
+<td><code>REFUND</code></td>
+<td><code>ref</code> (CAPTURE), <code>amount_minor</code></td>
+<td>If the capture exists <strong>and</strong> <code>refunded_so_far + amount ≤ captured amount</code>: <code>settled -= amount</code>. Otherwise <strong>reject</strong>. Fees are not refunded.</td>
+</tr>
+<tr>
+<td><code>CHARGEBACK</code></td>
+<td><code>ref</code> (CAPTURE), <code>amount_minor</code>, <code>fee_minor</code></td>
+<td>If the capture exists: <code>settled -= amount + fee</code>; <code>platform[currency] += fee</code>. It may go negative. Otherwise reject.</td>
+</tr>
+<tr>
+<td><code>PAYOUT_REQUEST</code></td>
+<td><code>amount_minor</code></td>
+<td>If <code>amount &gt; 0</code> <strong>and</strong> <code>available ≥ amount</code> at this point in the sequence: <code>settled -= amount</code> and the payout is <strong>accepted</strong>. Otherwise it is <strong>rejected</strong> (<code>insufficient_funds</code>).</td>
+</tr>
+<tr>
+<td>anything else</td>
+<td>—</td>
+<td><strong>Ignore</strong> it, for forward compatibility, but it still consumes its sequence number.</td>
+</tr>
+</tbody>
+</table>
+<p>Rejected events still consume their sequence number. <code>NOTICE</code> and <code>GAP_FILL</code> frames have no ledger effect.</p>
+<p><strong>Payout execution.</strong> An accepted payout must be executed at the bank <strong>exactly once</strong>, using:</p>
+<table>
+<thead>
+<tr>
+<th>Bank field</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>reference</code></td>
+<td>the <code>event_id</code></td>
+</tr>
+<tr>
+<td><code>account</code></td>
+<td>the merchant's <code>bank_account</code> at that point in the sequence</td>
+</tr>
+<tr>
+<td><code>currency</code></td>
+<td>the merchant's currency</td>
+</tr>
+<tr>
+<td><code>amount_minor</code></td>
+<td>the requested amount</td>
+</tr>
+</tbody>
+</table>
+<p>A payout to a closed account (<code>422 account_closed</code>) is <strong>failed</strong>. Its money stays deducted (operations handles it manually), and it must never be retried.</p>
+<p><code>harness/ledger_events.py → apply_event()</code> is the reference implementation of this table. Where the prose and the code disagree, the code wins.</p>
+<hr />
+<h2 id="5-part-a-build-it">5. Part A: build it</h2>
+<h3 id="51-required-stack">5.1 Required stack</h3>
+<ul>
+<li><strong>Language:</strong> Python 3.11+ for your services (any framework: asyncio, FastAPI, Django, …).</li>
+<li><strong>Database:</strong> PostgreSQL 15+ is the system of record.</li>
+<li><strong>Redis:</strong> required for cross-process coordination. <strong>Your correctness must not depend on Redis being durable.</strong> We will wipe it mid-run.</li>
+<li><strong>Broker:</strong> one of Kafka / Redpanda, RabbitMQ (quorum queues or streams), NATS JetStream, or Redis Streams. Justify the choice.</li>
+<li><strong>Run command:</strong> <code>docker compose up</code> must bring up everything, including the harness services from <code>harness/docker-compose.harness.yml</code>, with no manual steps. Document how to scale each service.</li>
+</ul>
+<h3 id="52-required-behaviour">5.2 Required behaviour</h3>
+<p><strong>A1. Session ownership and the protocol.</strong>
+- <strong>Replicas.</strong> Run <strong>≥ 2 session-reader replicas</strong>. Exactly one may hold the gateway session at a time.
+- <strong>Failover.</strong> If the leader dies (<code>kill -9</code>), a standby must hold the session within <strong>15 s</strong>.
+- <strong>A paused leader.</strong> If the leader is <strong>paused</strong> (<code>SIGSTOP</code> for 45 s) and then resumes, nothing it does afterwards may corrupt the ledger or the stream. Explain what fences it.
+- <strong>The protocol.</strong> Implement BOSP/1 correctly:
+  - framing;
+  - heartbeats and <code>TEST_REQUEST</code>;
+  - gap detection and resend, <strong>including lost resends</strong>;
+  - <code>GAP_FILL</code>;
+  - duplicates, whatever their <code>poss_dup</code> flag;
+  - resume from a checkpoint;
+  - credit.
+- <strong>Credit and durability.</strong> How your credit grants relate to durability downstream is part of the design: state it.</p>
+<p><strong>A2. Parallel processing with ordering.</strong>
+- <strong>Consumers.</strong> Run <strong>≥ 4 ledger-consumer processes</strong> (processes, not threads) that apply events in parallel while preserving <strong>per-merchant order</strong>.
+- <strong>What it must survive:</strong> a consumer <code>kill -9</code> mid-batch, a broker restart, and a rebalance or scale-out, all without double-applying, skipping or reordering anything.
+- <strong>Delivery semantics.</strong> Write down the delivery semantics at every hop.</p>
+<p><strong>A3. The ledger, in PostgreSQL.</strong>
+- <strong>Rules and effects.</strong> Apply the rules in §4 with <strong>exactly-once effect</strong>, in integer minor units.
+- <strong>Throughput.</strong> Sustain <strong>≥ 3,000 events/s</strong> end to end on our review machine (8 cores, 32 GB) at 2 M events with chaos on, and <strong>catch up within 60 s</strong> of the gateway finishing.
+- <strong>Platform fees.</strong> Every capture across every merchant touches them. Do not let that become one hot row everything serialises on, or, if you choose to, show us the numbers that make it acceptable.</p>
+<p><strong>A4. Payouts.</strong>
+- <strong>Executors.</strong> Run <strong>≥ 2 payout-executor processes</strong>.
+- <strong>What they must achieve:</strong>
+  - every accepted payout executed <strong>exactly once</strong>;
+  - closed-account payouts failed, never retried;
+  - nothing lost, nothing paid twice.
+- <strong>What they must survive:</strong> the bank's failure modes, scheduled maintenance windows longer than the idempotency-key lifetime, and executor crashes at any point.
+- <strong>Shared limits.</strong> The single-token OAuth session, the global rate limit and the per-account in-flight limit are shared by all executors.</p>
+<p><strong>A5. Read API.</strong> The contract <code>verify.py</code> uses:</p>
+<pre><code>GET /v1/merchants/{merchant_id}/balance
+  → 200 {&quot;merchant_id&quot;, &quot;currency&quot;, &quot;settled_minor&quot;, &quot;held_minor&quot;, &quot;available_minor&quot;, &quot;last_seq&quot;}
+     last_seq = the highest channel sequence number fully processed (NOTICE / GAP_FILL included)
+
+GET /v1/merchants/{merchant_id}/balance?as_of=2026-11-03T14:05:09.123Z
+  → 200 {&quot;merchant_id&quot;, &quot;settled_minor&quot;, &quot;held_minor&quot;, &quot;available_minor&quot;}
+     the balance after every event of that merchant with event_time ≤ as_of; all zeros before the first event
+
+GET /v1/platform/balances            → 200 {&quot;USD&quot;: 123, &quot;EUR&quot;: 45, ...}
+
+GET /v1/payouts/{payout_id}          → 200 {&quot;payout_id&quot;, &quot;status&quot;: &quot;pending|paid|failed|rejected&quot;, &quot;bank_payout_id&quot;, &quot;reason&quot;}
+                                        404 if that PAYOUT_REQUEST has not been applied yet
+</code></pre>
+<p><code>as_of</code> must have a p99 latency <strong>&lt; 50 ms</strong> over HTTP at 2 M events, and Part B must explain how that holds at 3 B rows.</p>
+<p><strong>A6. Observability.</strong>
+- <strong>Questions an operator must be able to answer:</strong>
+  - which channels are behind and by how much;
+  - who holds the session, and since when (epoch);
+  - resend and gap rates;
+  - broker lag per partition or queue;
+  - payouts by state, including <strong>ambiguous / unknown outcome</strong>;
+  - bank error classes.
+- <strong>Endpoints:</strong> <code>/healthz</code> and <code>/readyz</code> with real checks.
+- <strong>Logs:</strong> structured, carrying <code>event_id</code> / <code>payout_id</code> / <code>session_epoch</code>.</p>
+<p><strong>A7. Tests.</strong>
+- <strong>The risky logic, not getters:</strong>
+  - the per-channel sequencing state machine (unit, deterministic: gaps, lost resend, <code>GAP_FILL</code>, duplicates, reconnect);
+  - exactly-once apply under concurrent redelivery, against <strong>real PostgreSQL</strong>;
+  - the payout outcome matrix (every row of the table in <code>BANK-API.md</code>);
+  - the cross-process limiter.
+- <strong>Fault injection.</strong> Include a script that reproduces at least <strong>two</strong> of the faults in §5.4 against your running stack.</p>
+<h3 id="53-how-we-check-part-a">5.3 How we check Part A</h3>
+<p>We run <code>harness/verify.py check</code> after each scenario. It must print <code>RESULT: PASS</code>. It checks:
+- every channel drained;
+- every balance exact;
+- point-in-time balances;
+- platform fees;
+- every payout's status;
+- the <strong>bank's own record of money moved</strong>: exactly one execution per paid payout, none otherwise.</p>
+<h3 id="54-our-fault-injection-schedule-published-so-it-is-fair">5.4 Our fault-injection schedule (published, so it is fair)</h3>
+<p>During a single 2 M-frame run, in an order and at times we choose, we will:</p>
+<ol>
+<li><code>kill -9</code> the session-reader leader.</li>
+<li><code>SIGSTOP</code> the (new) leader for 45 s, then <code>SIGCONT</code> it.</li>
+<li><code>kill -9</code> one ledger consumer in the middle of a batch; add two more consumers later.</li>
+<li>Restart the broker.</li>
+<li>Restart Redis <strong>without persistence</strong>, as if after a <code>FLUSHALL</code>.</li>
+<li>Restart PostgreSQL (fast shutdown).</li>
+<li><code>kill -9</code> a payout executor while a payout is in flight, and again during a bank maintenance window.</li>
+<li>Raise gateway chaos: 5× the drop rate, disconnects every 20–40 s.</li>
+<li>Shrink the bank's windows: idempotency TTL 20 s, maintenance 30 s every 90 s, 10% after-commit failures.</li>
+</ol>
+<hr />
+<h2 id="6-part-b-designmd">6. Part B: <code>DESIGN.md</code></h2>
+<p>Answer with <strong>numbers and mechanisms</strong>, against §2. Generic prose ("we'd add more workers", "Kafka scales horizontally") scores zero. Diagrams are welcome; walls of generated text are not. Keep it under ~8 pages.</p>
+<ol>
+<li><strong>Delivery semantics, hop by hop.</strong> For each hop:
+   - gateway → reader
+   - reader → broker
+   - broker → consumer
+   - consumer → PostgreSQL
+   - PostgreSQL → payout executor → bank</li>
+</ol>
+<p>Say whether it is at-most-once, at-least-once or effectively-once, and <strong>the exact mechanism</strong>: key, constraint, offset or checkpoint, and <strong>when</strong> it is written relative to the effect.
+2. <strong>Fencing.</strong> The leader stalls for 45 s while holding received-but-unpublished frames and an open producer. A standby takes over and resumes. The old leader wakes up.
+   - Walk through, step by step, what each process does and what stops corruption, at which hop.
+   - What is your fencing token, and who checks it?
+   - Why is a lock with a TTL not sufficient on its own?
+3. <strong>Backpressure.</strong> At a 30 k/s peak your broker slows to 10 k/s for 10 minutes.
+   - Where does the backlog live, how big does it get, and what bounds memory in each process?
+   - How does credit flow control participate?
+4. <strong>Partitioning and skew.</strong>
+   - Partition count, and the key, for 60 k Zipf-skewed merchants.
+   - What happens when one merchant alone exceeds a partition's or worker's throughput?
+   - How do you go beyond one 25 k frames/s session (16 <code>client_id</code>s)? How are channels assigned, and how is that reassigned on failure without two sessions owning a channel?
+5. <strong>PostgreSQL at 3 B rows:</strong>
+   - schema, partitioning strategy and keys;
+   - the index that serves an exact <code>as_of</code> in &lt; 200 ms at 3 B rows, and the write cost it adds;
+   - update-heavy rows (running balances, platform fees): HOT updates, vacuum, bloat, contention at 30 k events/s;
+   - estimated WAL volume per day;
+   - <code>synchronous_commit</code> and fsync choices, and why;
+   - your connection-pooling mode, and what it forbids you from using.
+6. <strong>Isolation levels.</strong> State the isolation level of every transaction, and why. Give <strong>one concrete anomaly</strong> your design would suffer at READ COMMITTED if you removed one specific lock or constraint you rely on: name it, and show the interleaving.
+7. <strong>Payout maths and the ambiguity protocol.</strong>
+   - Month-end: 1.5 M payouts in 6 h against 50 req/s and 2-in-flight per account. What is the drain time, what is the backlog, and which merchants wait longest?
+   - Your ambiguous-outcome protocol as a <strong>state machine</strong>.
+   - Where, under your design, could a double payment still occur, and what would detect it?
+8. <strong>Failure modes.</strong> For each, what happens, what self-heals, and what pages a human:
+   - Redis lost;
+   - PostgreSQL failover to an <strong>async</strong> replica (what is lost; how do you detect and repair the ledger and the session checkpoint?);
+   - a broker partition-leader loss;
+   - a gateway checkpoint older than the 72 h replay window;
+   - a poison event.
+9. <strong>Three tradeoffs</strong> you made: what you gave up, and what you would change with more time.</p>
+<hr />
+<h2 id="7-part-c-reviewmd-the-incumbent">7. Part C: <code>REVIEW.md</code>, the incumbent</h2>
+<p><code>incumbent/</code> is the previous team's version of this system. They used Kafka.</p>
+<p>It ran in production for two weeks and was rolled back after an incident:
+- <strong>14 payouts were executed twice</strong>;
+- <strong>3 merchants' balances drifted</strong> from the acquirer's statements;
+- <strong>a further 9 accepted payouts were never sent</strong>.</p>
+<p>The post-mortem never found the root causes. <code>incumbent/README.md</code> has the context.</p>
+<p><strong>Deliver <code>REVIEW.md</code>:</strong></p>
+<ol>
+<li><strong>Every defect you find, ranked by severity.</strong> For each:
+   - <code>file:line</code>;
+   - the <strong>concrete trigger</strong>: the interleaving, failure or input that makes it go wrong;
+   - the <strong>impact</strong>: money, ordering, loss, availability or performance;
+   - the fix.</li>
+<li><strong>Root causes.</strong> Which defects, in combination, explain each of the three incident symptoms? Be specific: name the defects and the sequence of events.</li>
+<li><strong>Reproducers for your top 5.</strong> An <strong>executable reproducer</strong> for each of your five most severe defects: a test or script that <strong>fails against the incumbent logic and passes against your fix</strong>.
+   - You may extract the incumbent logic into testable units.
+   - You may run against the PostgreSQL/Redis in your compose.
+   - A description of a reproducer is not a reproducer.</li>
+</ol>
+<p>We know of more than 20 defects. Some are the kind any linter or assistant flags in seconds; those are worth little. The ones that caused the incident are not.</p>
+<hr />
+<h2 id="8-deliverables">8. Deliverables</h2>
+<pre><code>your-submission/
+├── README.md            # how to run (one command), how to scale each service, what's built vs deferred,
+│                        #   known issues, and TIME SPENT PER AREA (honestly)
+├── DESIGN.md            # Part B
+├── REVIEW.md            # Part C
+├── AI-USAGE.md          # which tools you used, for what, and three places where the AI was wrong
+│                        #   and how you noticed
+├── docker-compose.yml   # everything, including the harness services
+├── services/ ...        # your code
+├── tests/ ...           # including Part C reproducers
+└── scripts/faults.*     # your fault-injection script (A7)
+</code></pre>
+<hr />
+<h2 id="9-submission">9. Submission</h2>
+<ul>
+<li><strong>Format.</strong> A Git repository link (preferred) or a zip without virtualenvs, <code>node_modules</code>, data dumps or database volumes. A commit history that shows your progression is valuable to us.</li>
+<li><strong>Runtime.</strong> It must start with the documented command in <strong>under 10 minutes</strong> on a clean machine with Docker.</li>
+<li><strong>The debrief.</strong> In the debrief you will be asked to make a change live, for example "payouts must now also respect a per-merchant daily limit", or "the gateway now sends <code>CHANNEL_RESET</code>". Expect it.</li>
+</ul>
+<hr />
+<h2 id="10-how-to-spend-the-6-hours">10. How to spend the 6 hours</h2>
+<p>This is more than 6 hours of work if you have to look things up. That is deliberate: we want to see what you prioritise. A suggested order:</p>
+<table>
+<thead>
+<tr>
+<th>Time</th>
+<th>Focus</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0:00–0:45</td>
+<td>Read <code>PROTOCOL.md</code>, <code>BANK-API.md</code>, §4 and the incumbent. Decide the architecture and delivery semantics <strong>before</strong> prompting anything.</td>
+</tr>
+<tr>
+<td>0:45–2:30</td>
+<td>Session reader (protocol state machine plus leadership), broker, ledger consumers. Get <code>verify.py</code> passing on balances with chaos on.</td>
+</tr>
+<tr>
+<td>2:30–3:45</td>
+<td>Payout executor: token, limits, the ambiguity protocol. Get the bank checks passing.</td>
+</tr>
+<tr>
+<td>3:45–4:45</td>
+<td>Part C <code>REVIEW.md</code> plus the top-5 reproducers.</td>
+</tr>
+<tr>
+<td>4:45–5:30</td>
+<td>Part B <code>DESIGN.md</code>.</td>
+</tr>
+<tr>
+<td>5:30–6:00</td>
+<td>Fault-injection run, README, <code>AI-USAGE.md</code>.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>If you run out of time:</strong>
+- correctness beats throughput;
+- the payout path beats observability;
+- a written, specific account of what you did not build beats a half-built feature.</p>
+<p><strong>Tell us what you deferred and why.</strong></p>
+<hr />
+<h2 id="11-ground-rules">11. Ground rules</h2>
+<ul>
+<li><strong>AI tools.</strong> Use any tools, libraries and AI assistants you like. You must be able to explain every line and every decision; unexplained code counts against you.</li>
+<li><strong>The harness.</strong> Do not modify it. We run our own copy.</li>
+<li><strong>Assumptions.</strong> Write them down. Where this brief is ambiguous, choose, state the choice, and move on.</li>
+<li><strong>Questions.</strong> You may email us questions about the brief. We answer clarifications, not design questions.</li>
+</ul>
+</main></body></html>
