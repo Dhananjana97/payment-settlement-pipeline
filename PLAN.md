@@ -175,9 +175,9 @@ Keep under ~8 pages; diagrams welcome.
 - [x] Commit history shows progression (commit at each milestone).
 
 
-### Step 9 — Observability stack (Prometheus, Loki, Grafana) — 📝 planned: `docs/STEP9-PLAN.md`
-- [ ] Prometheus scrapes every replica via DNS service discovery (`--scale` aware); Loki gets the JSON logs via Grafana Alloy; Grafana provisioned with an A6 "Settlement overview" dashboard, a "Trace" dashboard (by `payout_id` / `event_id` / `channel`) and alert rules for the DESIGN.md §8 paging conditions.
-- [ ] smoke + integration checks; start-up time stays well under 10 min; README "Operate it" updated; D28–D31.
+### Step 9 — Observability stack (Prometheus, Loki, Grafana) — ✅ DONE 2026-11-04: Grafana :3000 (overview + trace dashboards, 7 alerts), smoke 21/21, observability tests 15/15 (`docs/STEP9-PLAN.md`)
+- [x] Prometheus scrapes every replica via DNS service discovery (`--scale` aware); Loki gets the JSON logs via Grafana Alloy; Grafana provisioned with an A6 "Settlement overview" dashboard, a "Trace" dashboard (by `payout_id` / `event_id` / `channel`) and alert rules for the DESIGN.md §8 paging conditions.
+- [x] smoke + integration checks; start-up time stays well under 10 min; README "Operate it" updated; D28–D31.
 ---
 
 ## 5. Priorities if time runs out

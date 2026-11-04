@@ -370,6 +370,11 @@ class ExecutorApp:
             return False, p
         if new_status != p.status:
             metrics.payout_transitions_total.labels(from_status=p.status, to_status=new_status).inc()
+            # one line per state change, so a payout's history can be read in Loki/Grafana
+            # (Trace dashboard: `| payout_id="..."`); the log is bound with payout_id/attempt/key
+            log.info("payout transition", from_status=p.status, to_status=new_status,
+                     attempt=fields_.get("attempt", p.attempt),
+                     idempotency_key=fields_.get("idempotency_key", p.idempotency_key))
         return True, _merge(p, fields_)
 
     # --------------------------------------------------------------------- helpers

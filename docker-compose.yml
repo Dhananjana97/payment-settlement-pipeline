@@ -11,6 +11,9 @@
 
 include:
   - harness/docker-compose.harness.yml
+  # Step 9 observability (D28–D32): Prometheus + Loki + Alloy, then Grafana on :3000
+  - observability/compose.collect.yml
+  - observability/compose.grafana.yml
 
 x-service: &service
   build:

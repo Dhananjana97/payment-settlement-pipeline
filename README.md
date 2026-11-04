@@ -38,8 +38,12 @@ python harness/verify.py check --api http://localhost:8080   # full correctness 
 | postgres | 5432 | `ledger` / `ledger` / `ledger` |
 | redis | 6379 | non-durable on purpose (`--save "" --appendonly no`) |
 | redpanda | 19092 | external listener; internal `redpanda:9092` |
+| grafana | 3000 | dashboards + log search, no login (anonymous Viewer) |
+| prometheus | 9090 | metrics, scrapes every replica every 5 s |
+| loki | 3100 | log store (query it through Grafana Explore) |
+| alloy | 12345 | log shipper UI (Docker logs → Loki) |
 
-Host ports are `${PG_HOST_PORT:-5432}`, `${API_HOST_PORT:-8080}`, etc. If they clash locally, remap them in a **git-ignored** `docker-compose.override.yml`. Reviewers get the standard ports.
+Host ports are `${PG_HOST_PORT:-5432}`, `${API_HOST_PORT:-8080}`, `${GRAFANA_HOST_PORT:-3000}`, `${PROMETHEUS_HOST_PORT:-9090}`, `${LOKI_HOST_PORT:-3100}`, etc. If they clash locally, remap them in a **git-ignored** `docker-compose.override.yml`. Reviewers get the standard ports.
 
 **Tunables** all live in `.env`:
 
@@ -70,10 +74,34 @@ Each non-API service serves `/healthz`, `/readyz` (real checks) and `/metrics` o
 | Which channels are behind, by how much | `/v1/ops/status` → `channels.behind` (top 20 by `channel_progress.updated_at` age); reader `reader_channel_lag{channel}` (unacked frames) |
 | Who holds the session, since when, epoch | `/v1/ops/status` → `session` (`epoch`, `holder`, `lease_expires_in_s`); `reader_is_leader`, `reader_session_epoch`, `reader_session_since_seconds` |
 | Resend and gap rates | `reader_gaps_total`, `reader_resends_total{reason=gap\|timeout}`, `reader_duplicates_total`, `reader_reconnects_total{reason}` |
-| Broker lag per partition | `docker compose exec redpanda rpk group describe ledger --brokers redpanda:9092`. The `consumer_partition_lag` gauge is declared but **not populated** (Known issues) |
+| Broker lag per partition | `consumer_partition_lag{partition}` (high watermark − last committed offset, every 5 s, per owning consumer); cross-check with `docker compose exec redpanda rpk group describe ledger --brokers redpanda:9092` |
 | Payouts by state incl. ambiguous | `/v1/ops/status` → `payouts.by_status` (all 8 statuses incl. `ambiguous`, `stuck`); `payouts_by_status{status}` |
 | Bank error classes | `/v1/ops/status` → `bank.attempts_by_status` (last 5 min, `timeout` for no response); `bank_responses_total{klass}`, `bank_request_seconds`, `bank_duplicate_reference_total`, `payouts_stuck_total`, `limiter_fallback` |
 | Consumer outcomes | `consumer_events_total{outcome}` (applied, rejected:*, duplicate, stale_epoch, out_of_order, malformed), `consumer_out_of_order_total` (expected 0) |
+
+### Dashboards and logs
+
+| What | Where |
+|---|---|
+| Grafana (no login) | http://localhost:3000 |
+| Prometheus | http://localhost:9090 (targets: Status → Targets) |
+| Loki | through Grafana → **Explore** → Loki datasource |
+
+- **Settlement overview** dashboard: one row per A6 question above (channels behind, session holder/epoch, gaps and resends, lag per partition, payouts by status incl. `ambiguous`/`stuck`, bank error classes), plus throughput, latencies, limiter mode and a WARNING/ERROR log panel. Alert rules fire on the DESIGN.md §8 "pages a human" conditions.
+- **Trace** dashboard: pick a `payout_id` (executor lines: claimed → in_flight → bank response → paid), an `event_id`, or a `channel` (reader and consumer lines), in time order.
+
+Copy-paste LogQL (Explore → Loki):
+
+```logql
+{service="executor"} | payout_id="M-0042:1187"                      # one payout's full history (executor logs per payout)
+sum by (service) (count_over_time({level="ERROR"}[5m]))             # errors per service
+{service=~"reader|consumer"} | channel="M-0042"                      # one channel: gaps, resends, out-of-order
+{service="reader"} |~ "session up|session down|stepping down|became leader"   # session changes; session_epoch is on each line
+{service="consumer"} |= "out-of-order message skipped"              # should be empty
+```
+Labels are `service`, `container` and `level`; `payout_id`, `event_id`, `session_epoch`, `channel` and `instance` are structured metadata, filtered as above without `| json` (D29). Leader/session gauges are exported by every process (0 elsewhere), so Prometheus queries filter `{service="reader"}`.
+
+Observability runs locally (Prometheus + Loki + Grafana in compose) because this is a local assessment; in a cloud deployment the managed equivalents (e.g. AWS CloudWatch Logs, Amazon Managed Prometheus, Amazon Managed Grafana) would replace them with no service code change (D32).
 
 ## 4. Faults
 
@@ -143,7 +171,6 @@ Details: execution notes in `docs/STEP2-PLAN.md` … `docs/STEP8-PLAN.md`.
 
 ## 8. Known issues
 
-- **Broker lag gauge empty:** `consumer_partition_lag` is declared but never set. Use `rpk group describe ledger` (§3).
 - **Undecodable bytes stall their channel:** a message that can't be decoded is counted `malformed` but doesn't consume its seq; if the same bytes keep coming, that channel stops (`DESIGN.md` §8). Decodable-but-malformed events are `rejected:malformed_event` and do advance.
 - **Failover time depends on load:** 8.6 s idle, 10.8 s during milestone 2; it is driven by the 10 s lease TTL (`ReaderConfig.lease_ttl_s`).
 - **Limiter jitter:** Redis-side windows never exceed 18/s; client-side timestamps peaked at 19–23 on a loaded machine. Any overshoot is a 429 before commit, retried with the same key.

@@ -102,12 +102,19 @@ This is how to answer "what happened to payout X" in the debrief.
 | Main | merge the compose changes from O1/O2 (they edit different service blocks; main applies both), bring up, verify, commit |
 
 ## 9. Checklist
-- [ ] Prometheus scraping all replicas via DNS SD; `--scale` picked up
-- [ ] Loki receiving JSON logs from every service via Alloy; `payout_id` searchable
-- [ ] Grafana: overview + trace dashboards and alert rules provisioned, anonymous viewer
-- [ ] smoke + integration checks green; start-up time recorded
-- [ ] README "Operate it" updated (URLs, dashboards, LogQL examples); D28–D31
-- [ ] Commit on `feature/step-9-observability`, merge to `main`, tick `PLAN.md`
+- [x] Prometheus scraping all replicas via DNS SD; `--scale` picked up
+- [x] Loki receiving JSON logs from every service via Alloy; `payout_id` searchable
+- [x] Grafana: overview + trace dashboards and alert rules provisioned, anonymous viewer
+- [x] smoke + integration checks green; start-up time recorded
+- [x] README "Operate it" updated (URLs, dashboards, LogQL examples); D28–D31
+- [x] Commit on `feature/step-9-observability`, merge to `main`, tick `PLAN.md`
+
+## Execution notes (2026-11-04)
+- One-command bring-up from clean (`docker compose up -d --build --wait`, 15 services incl. Prometheus, Loki, Alloy, Grafana); `scripts/smoke.sh` → **PASS (21 checks)**: every reader/consumer/executor/api replica an `up` Prometheus target, Loki receiving, Grafana healthy with both dashboards provisioned.
+- `tests/integration/test_observability.py`: **15/15 PASS** on the live stack. All 35 overview PromQL queries return series (O2); scaling consumers 4 → 6 appeared as targets in 12 s (O1).
+- Trace: executor now logs every payout state change (`services/executor/app.py::_persist`), so `{service="executor"} | payout_id="M-0016:1292"` reads `claimed → in_flight`, `bank response 201`, `in_flight → paid`.
+- 7 Grafana-managed alert rules (4 page: duplicate bank reference, stuck payout, out-of-order, no reader leader; 3 warn).
+- The full `verify.py` run on this bring-up was stopped early by choice; Step 9 changes no pipeline logic except one log line, and `verify.py` already passed on milestone 1, milestone 2, S1 and S2.
 
 ## 10. Deferred
 Alertmanager with external contact points; tracing (OpenTelemetry/Tempo); Postgres/Redis exporters; long-term storage.

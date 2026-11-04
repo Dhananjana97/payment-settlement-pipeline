@@ -1,0 +1,13 @@
+# Dashboards are loaded from files in git (D30): reproducible, no clicks.
+apiVersion: 1
+
+providers:
+  - name: settlement
+    folder: Settlement
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,86 @@
+// Grafana Alloy: tail this compose project's container logs and ship them to Loki
+// (docs/STEP9-PLAN.md D29).
+//
+// Labels stay low-cardinality (`service`, `level`, plus `container` for per-replica filtering).
+// Per-event ids go to structured metadata, so `| payout_id="M-0042:1187"` works without
+// creating one stream per payout. Harness containers print plain text: the JSON stage simply
+// extracts nothing for them and they keep only the compose-derived labels.
+
+discovery.docker "project" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+
+  filter {
+    name   = "label"
+    values = ["com.docker.compose.project=" + coalesce(sys.env("COMPOSE_PROJECT_NAME"), "blueocean-backend-assignment-v2")]
+  }
+}
+
+discovery.relabel "project" {
+  targets = discovery.docker.project.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/?(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "project" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.relabel.project.output
+  forward_to       = [loki.process.json.receiver]
+  refresh_interval = "5s"
+}
+
+loki.process "json" {
+  stage.json {
+    expressions = {
+      level         = "level",
+      json_service  = "service",
+      msg           = "msg",
+      ts            = "ts",
+      event_id      = "event_id",
+      payout_id     = "payout_id",
+      session_epoch = "session_epoch",
+      channel       = "channel",
+      instance      = "instance",
+    }
+  }
+
+  // Only JSON lines carry `ts`; plain-text lines keep Docker's receive time.
+  stage.timestamp {
+    source            = "ts"
+    format            = "RFC3339"
+    action_on_failure = "skip"
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+
+  stage.structured_metadata {
+    values = {
+      event_id      = "",
+      payout_id     = "",
+      session_epoch = "",
+      channel       = "",
+      instance      = "",
+    }
+  }
+
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
