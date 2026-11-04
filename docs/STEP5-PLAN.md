@@ -158,9 +158,9 @@ Agent 3 codes against the §3 contracts and fakes, so it doesn't wait for agents
 - [x] Agent 2: migration, models, ports, adapters, compose overrides + integration tests
 - [x] Agent 3: app, main, fakes, app tests, faults.sh subcommands
 - [x] Wire, rebuild, unit + integration green
-- [ ] Milestone 1 (default chaos) PASS; milestone 2 (shrunk windows) PASS; fault run PASS
-- [ ] DECISIONS.md: D24–D27, D6 revision; DESIGN.md §7 numbers taken from B §5 and A §4.4
-- [ ] Commit on `feature/step-5-payouts`, PR, tick PLAN.md
+- [x] Milestone 1 (default chaos) PASS; milestone 2 (shrunk windows) PASS; fault run PASS
+- [x] DECISIONS.md: D24–D27, D6 revision; DESIGN.md §7 numbers taken from B §5 and A §4.4
+- [x] Commit on `feature/step-5-payouts`, PR, tick PLAN.md
 
 ## Execution notes (2026-11-04)
 
@@ -170,6 +170,12 @@ Agent 3 codes against the §3 contracts and fakes, so it doesn't wait for agents
 - as_of p99 6.2 ms over HTTP (600 queries). Consumer `out_of_order_total` = 0 on all four consumers on the fresh stack (closes the Step 3 question).
 - Maintenance behaviour observed: during a 150 s window ~190–400 payouts sat in `in_flight` with no lease and `next_attempt_at` set, no thread held; the backlog cleared in ~20 s after the window ended.
 - Agent-found bugs fixed before the run: bank keep-alive poisoning (503/401 answered before the body is read → `Connection: close` on payout POSTs); limiter burst on Redis wipe (36 → ≤ 18–21 per window).
+
+**Milestone 2, fresh stack, shrunk bank windows (`BANK_IDEMPOTENCY_TTL_S=20 BANK_OUTAGE_FIRST_S=30 BANK_OUTAGE_LEN_S=30 BANK_OUTAGE_EVERY_S=90 BANK_P_FAIL_AFTER_COMMIT=0.10`) with faults injected during the run: `verify.py check` → RESULT: PASS (all six sections).**
+- Faults (`scripts/faults.sh`, scratchpad log): kill -9 reader leader → new session 10.8 s; kill -9 consumer → restarted 3.4 s; kill -9 executor with `M-0069:1113` in flight → paid 4.3 s later, attempt 1; Redis restarted empty; kill -9 executor during maintenance → all 39 in-flight payouts terminal, 12 via search; SIGSTOP leader 45 s → standby in 10.6 s, old leader stepped down `lock_lost` before reconnecting; Postgres restart → same leader kept the session (D20).
+- Bank stats: 1,431 POSTs, 1,015 executed (= paid), 294 maintenance 503s, 33 fail-before-commit, 89 fail-after-commit, 23 hang-after-commit, 71 idempotent replays, 0 × 429, 0 invalid tokens, 11 tokens.
+- Payout rows: 42 bank searches in total, 0 payouts needed a second key (max attempt 1): every ambiguous outcome resolved by same-key replay or search.
+- as_of p99 3.9 ms.
 
 ## 7. Deferred
 - Reconciliation sweep for the residual double-pay window (A §4.4): designed and measured as a metric only; a scheduled sweep job is a DESIGN.md item.

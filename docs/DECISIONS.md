@@ -370,10 +370,25 @@ Rules, derived from `bank.py`:
 
 ---
 
+## D24–D27. Payout executor (Step 5)
+
+Full rationale, options and the reconciliation between the three design sections: `docs/STEP5-PLAN.md` §2 and `docs/step5/A-fsm.md`, `B-limits-token.md`, `C-claim-crash.md`.
+
+| # | Decision | Rejected alternatives | Evidence |
+|---|---|---|---|
+| D24 | Payout state machine `accepted → claimed → in_flight → {paid, failed, ambiguous, stuck}`; intent (`in_flight`, key, attempt, `pending_send_at`) committed **before** every POST; `stuck` for replies that can only mean our bug | outbox + cursor (incumbent P3/P4); status written only after the call (crash = unknown) | crash at each of 6 points → exactly one execution (`tests/unit/executor/test_app.py`); milestone 2 PASS |
+| D25 | Key `{payout_id}#a{attempt}`; reuse while no send under it had an unknown outcome, or while younger than `PAYOUT_KEY_SAFE_AGE_S` (10 s, ≤ ½ bank TTL); otherwise `ambiguous` → search; new key only after a successful empty search | new key per retry (incumbent P1 — double pays); same key forever (double pays once the bank forgets it after a maintenance window) | milestone 2 (TTL 20 s): 42 searches, 0 second keys, 0 double payments |
+| D26 | POST timeout 5 s (the bank commits before its 25 s hang, `bank.py:231→239`, so a same-key resend gets the replay); lease 45 s renewed before each call; waits stored in `next_attempt_at`, lease released | 30 s timeout (threads parked through every hang); sleeping while holding a lease | maintenance windows: ~190–400 rows waiting, no threads held, backlog cleared ~20 s after each window |
+| D27 | Claim = one `FOR UPDATE SKIP LOCKED` statement, oldest first, ≤ 2 per account **counting already-leased rows**, locked-row predicates repeated so READ COMMITTED's re-check can't double-claim | per-replica sharding (incumbent P11); advisory locks through PgBouncer (P7) | 4 threads × 80 claims, no row twice (`tests/integration/executor/test_pg_payout_repo.py`) |
+| D6 rev. | Token: single Postgres row, CAS mint ≤ 1 per 5 s, mint only if the failed token is still the stored one. Limiter: Redis sliding-window log 18/s + 9/s; local share from `executor_heartbeat` with no-grant window on leaving and re-entering Redis mode | per-process tokens (revoke each other); fixed-window limiter (2× burst at the boundary, incumbent P9) | two simultaneous 401s → one mint; Redis wipe burst 36 → ≤ 21; milestone 2: 0 × 429, 0 invalid tokens |
+
+---
+
 ## Changes log
 
 | Date | Change |
 |---|---|
+| 2026-11-04 | D24–D27 and D6 revision recorded after Step 5; both milestones PASS with 0 double payments. |
 | 2026-11-04 | D5 adjusted after reading `bank.py`: same-key retry first, search only when the key may have expired. |
 | 2026-11-04 | D6 adjusted: bank limit is 20 req/s in `bank.py`, not the 50 in the brief. |
 | 2026-11-04 | D11 added: SQLAlchemy 2.0 + Alembic; ORM for workflows, Core for the consumer apply / executor claim hot paths. |

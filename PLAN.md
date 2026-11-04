@@ -121,11 +121,11 @@ Decisions to write down (they feed DESIGN.md directly):
 - [x] `GET /v1/merchants/{id}/balance` (+ `last_seq`), `?as_of=` (index lookup, p99 < 50 ms), `GET /v1/platform/balances`, `GET /v1/payouts/{id}` (404 until applied).
 - [x] `/healthz`, `/readyz` (DB + broker reachable), `/metrics`.
 
-### Step 5 — Payout executors (2:45–3:45)  ← highest-risk area — 🔧 milestone 1 PASS (all six verify sections); shrunk-window run + faults pending (`docs/STEP5-PLAN.md`)
-- [ ] Shared OAuth token: single holder in Postgres/Redis with lease; refresh ≤ 1 per 5 s; all executors reuse the same token (new token revokes old).
-- [ ] Shared limits: global 20 req/s payouts, 10 req/s searches, 2 in-flight per `account` — cross-process limiter (Redis fast-path, but **must degrade safely when Redis is wiped**: fall back to Postgres row leases / conservative rate).
-- [ ] Claim a payout with a DB lease (`FOR UPDATE SKIP LOCKED`, lease expiry) so a crashed executor's work is reclaimed.
-- [ ] Outcome matrix (every row in BANK-API.md §2):
+### Step 5 — Payout executors (2:45–3:45)  ← highest-risk area — ✅ DONE 2026-11-04: verify PASS default chaos AND shrunk windows with all §5.4 faults injected; 0 double payments (`docs/STEP5-PLAN.md`)
+- [x] Shared OAuth token: single holder in Postgres/Redis with lease; refresh ≤ 1 per 5 s; all executors reuse the same token (new token revokes old).
+- [x] Shared limits: global 20 req/s payouts, 10 req/s searches, 2 in-flight per `account` — cross-process limiter (Redis fast-path, but **must degrade safely when Redis is wiped**: fall back to Postgres row leases / conservative rate).
+- [x] Claim a payout with a DB lease (`FOR UPDATE SKIP LOCKED`, lease expiry) so a crashed executor's work is reclaimed.
+- [x] Outcome matrix (every row in BANK-API.md §2):
   - `201` → paid; `200 Idempotent-Replayed` → paid (reuse response)
   - `401` → refresh token, retry same key
   - `409 too_many_inflight` → back off, retry
@@ -134,10 +134,10 @@ Decisions to write down (they feed DESIGN.md directly):
   - `422 idempotency_key_reused` / `invalid_request` → alert, mark for ops (should not happen)
   - `429` / `503 maintenance` / `503 upstream_unavailable` → retry after `Retry-After` (not committed)
   - `502 bad_gateway` / timeout → **ambiguous**: search by reference (after ≥ 3 s), paid if found; if not found **and** key may have expired (> 120 s / maintenance longer than TTL) → search again, then retry with a **new** key only after confirmed absent.
-- [ ] Persist every state transition before/after each bank call (crash at any point must be recoverable without a second execution).
-- [ ] Metrics: payouts by state incl. ambiguous/unknown; bank error classes.
-- [ ] **Tests:** unit — `domain/payout_fsm.py` every row of the `BANK-API.md` table as verified in `bank.py` (A7 outcome matrix), key-age boundary, `account_closed` terminal; app — executor with `FakeBank` + `FakeClock` driving timeout→same-key→replay and maintenance→ambiguous→search→new-key paths, crash-at-every-transition replay; integration — `claim()` with `SKIP LOCKED` under 2 executors, cross-process limiter (A7), `HttpBank` against the real `bank.py` incl. shrunk windows.
-- [ ] **Milestone:** `verify.py check` → `RESULT: PASS` with default bank chaos, then with shrunk windows (`BANK_IDEMPOTENCY_TTL_S=20 BANK_OUTAGE_FIRST_S=30 BANK_OUTAGE_LEN_S=30 BANK_OUTAGE_EVERY_S=90`).
+- [x] Persist every state transition before/after each bank call (crash at any point must be recoverable without a second execution).
+- [x] Metrics: payouts by state incl. ambiguous/unknown; bank error classes.
+- [x] **Tests:** unit — `domain/payout_fsm.py` every row of the `BANK-API.md` table as verified in `bank.py` (A7 outcome matrix), key-age boundary, `account_closed` terminal; app — executor with `FakeBank` + `FakeClock` driving timeout→same-key→replay and maintenance→ambiguous→search→new-key paths, crash-at-every-transition replay; integration — `claim()` with `SKIP LOCKED` under 2 executors, cross-process limiter (A7), `HttpBank` against the real `bank.py` incl. shrunk windows.
+- [x] **Milestone:** `verify.py check` → `RESULT: PASS` with default bank chaos, then with shrunk windows (`BANK_IDEMPOTENCY_TTL_S=20 BANK_OUTAGE_FIRST_S=30 BANK_OUTAGE_LEN_S=30 BANK_OUTAGE_EVERY_S=90`).
 
 ### Step 6 — Part C: REVIEW.md + reproducers (3:45–4:45) — ✅ DONE 2026-11-04 (`docs/STEP6-PLAN.md`, branch `feature/step-6-review`)
 - [x] Walk each incumbent file; list every defect with `file:line`, trigger, impact, fix. Rank by severity. Target > 20 (they know > 20).
